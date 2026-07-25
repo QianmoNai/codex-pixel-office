@@ -1,0 +1,15 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Codex Pixel Office
+Name[zh_CN]=Codex 像素办公室
+Comment=Watch active Codex sessions work as pixel characters
+Comment[zh_CN]=以上帝视角查看正在工作的 Codex 像素员工
+Exec="@APP_DIR@/run-desktop.sh"
+Icon=codex-pixel-office
+Terminal=false
+Categories=Development;
+Keywords=Codex;AI;Pixel;Office;Agent;
+StartupNotify=true
+StartupWMClass=io.github.qianmo.CodexPixelOffice
+X-GNOME-UsesNotifications=false

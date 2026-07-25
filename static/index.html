@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#16182b" />
+    <title>Codex Pixel Office</title>
+    <link rel="icon" href="/assets/status-working.png" type="image/png" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body data-theme="day">
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#office" aria-label="Codex Pixel Office 首页">
+          <span class="brand-mark" aria-hidden="true">
+            <span class="brand-window"></span>
+            <span class="brand-spark"></span>
+          </span>
+          <div class="brand-copy">
+            <h1>CODEX PIXEL OFFICE</h1>
+            <span>你的 AI 团队，正在营业</span>
+          </div>
+        </a>
+
+        <div class="topbar-center">
+          <span class="live-indicator" id="liveIndicator" aria-live="polite" aria-atomic="true">
+            <i></i><span id="connectionText">正在连接办公室…</span>
+          </span>
+          <span class="office-clock" id="officeClock" aria-label="办公室当前时间">--:--</span>
+        </div>
+
+        <div class="topbar-actions">
+          <button class="pixel-button theme-toggle" id="themeToggle" type="button" aria-label="切换昼夜氛围" aria-pressed="false">
+            <span class="theme-icon sun-icon" aria-hidden="true">☀</span>
+            <span class="theme-icon moon-icon" aria-hidden="true">☾</span>
+            <span class="button-label">夜班模式</span>
+          </button>
+        </div>
+      </header>
+
+      <main class="dashboard" id="office">
+        <section class="office-column" aria-label="会话办公室">
+          <div class="command-bar">
+            <div class="filter-group" aria-label="会话类型筛选">
+              <button class="filter-button is-active" type="button" data-filter="all" aria-pressed="true">
+                全部 <span id="filterAllCount">0</span>
+              </button>
+              <button class="filter-button" type="button" data-filter="main" aria-pressed="false">
+                主会话 <span id="filterMainCount">0</span>
+              </button>
+              <button class="filter-button" type="button" data-filter="subagent" aria-pressed="false">
+                子代理 <span id="filterSubCount">0</span>
+              </button>
+            </div>
+
+            <div class="view-tools" aria-label="老板视角控制">
+              <button class="pixel-button roam-toggle" id="roamToggle" type="button" aria-label="开启像素同事自由活动" aria-pressed="true">
+                <span class="roam-icon" aria-hidden="true">✥</span>
+                <span class="button-label">自由活动：开</span>
+              </button>
+              <span class="view-label">老板视角</span>
+              <button class="icon-button" id="zoomOut" type="button" aria-label="缩小办公室" title="缩小">−</button>
+              <output class="zoom-output" id="zoomOutput" aria-label="当前缩放">100%</output>
+              <button class="icon-button" id="zoomIn" type="button" aria-label="放大办公室" title="放大">＋</button>
+              <button class="icon-button fit-button" id="fitView" type="button" aria-label="恢复办公室 120% 默认视图" title="恢复 120% 视图">⌂</button>
+            </div>
+          </div>
+
+          <div class="stats-row" id="statusStats" aria-label="会话状态统计">
+            <div class="stat-card stat-total">
+              <span class="stat-icon">◆</span>
+              <span><strong id="statTotal">0</strong><small>在岗会话</small></span>
+            </div>
+            <div class="stat-card stat-working">
+              <span class="stat-icon"></span>
+              <span><strong id="statWorking">0</strong><small>编写中</small></span>
+            </div>
+            <div class="stat-card stat-thinking">
+              <span class="stat-icon"></span>
+              <span><strong id="statThinking">0</strong><small>思考中</small></span>
+            </div>
+            <div class="stat-card stat-tool">
+              <span class="stat-icon"></span>
+              <span><strong id="statTool">0</strong><small>调用工具</small></span>
+            </div>
+            <div class="stat-card stat-waiting">
+              <span class="stat-icon"></span>
+              <span><strong id="statWaiting">0</strong><small>等待中</small></span>
+            </div>
+            <div class="stat-card stat-idle">
+              <span class="stat-icon"></span>
+              <span><strong id="statIdle">0</strong><small>空闲</small></span>
+            </div>
+          </div>
+
+          <div class="office-frame">
+            <div class="frame-corner corner-tl"></div>
+            <div class="frame-corner corner-tr"></div>
+            <div class="frame-corner corner-bl"></div>
+            <div class="frame-corner corner-br"></div>
+
+            <div class="office-viewport" id="officeViewport" tabindex="0" aria-label="像素办公室画布。滚轮缩放，拖动平移，点击角色查看详情。">
+              <div class="office-scene" id="officeScene">
+                <div class="office-art" aria-hidden="true">
+                  <img class="office-bg-asset" src="/assets/office-bg.png" alt="" draggable="false" />
+                  <div class="floor-grid"></div>
+                  <div class="top-wall">
+                    <div class="window window-one"><i></i><i></i><i></i><i></i></div>
+                    <div class="window window-two"><i></i><i></i><i></i><i></i></div>
+                    <div class="wall-logo"><b>C</b><span>CODEX LAB</span></div>
+                    <div class="pixel-clock"><i></i><b></b></div>
+                  </div>
+
+                  <div class="room-label dev-label">DEVELOPMENT FLOOR</div>
+                  <div class="room-label lounge-label">COFFEE &amp; CONTEXT</div>
+                  <div class="room-label meeting-label">SYNC ZONE</div>
+
+                  <div class="lounge-zone">
+                    <div class="coffee-counter">
+                      <span class="coffee-machine"><i></i><b></b></span>
+                      <span class="mug mug-one"></span>
+                      <span class="mug mug-two"></span>
+                    </div>
+                    <div class="pixel-sofa"><i></i><b></b><span></span></div>
+                    <div class="lounge-rug"></div>
+                    <div class="plant plant-one"><i></i><i></i><i></i><b></b></div>
+                  </div>
+
+                  <div class="meeting-zone">
+                    <div class="meeting-table"></div>
+                    <span class="meeting-chair chair-a"></span>
+                    <span class="meeting-chair chair-b"></span>
+                    <span class="meeting-chair chair-c"></span>
+                    <span class="meeting-chair chair-d"></span>
+                    <div class="whiteboard"><span>SHIP IT!</span><i></i><b></b></div>
+                    <div class="plant plant-two"><i></i><i></i><i></i><b></b></div>
+                  </div>
+
+                  <div class="server-rack">
+                    <span class="server-title">MCP</span>
+                    <i></i><i></i><i></i><i></i>
+                  </div>
+                  <div class="floor-cable cable-one"></div>
+                  <div class="floor-cable cable-two"></div>
+                </div>
+
+                <div class="workstations-layer" id="workstationsLayer" aria-hidden="true"></div>
+                <div class="agents-layer" id="agentsLayer"></div>
+                <div class="npcs-layer" id="npcsLayer">
+                  <button class="boss-npc" id="bossNpc" type="button" data-action="review" aria-label="老板正在会议厅巡视，点击和他打招呼">
+                    <span class="boss-bubble" id="bossBubble" aria-hidden="true">让我看看大家的进度。</span>
+                    <span class="boss-aura" aria-hidden="true"></span>
+                    <img class="boss-sprite" id="bossSprite" src="/assets/boss.png" alt="" draggable="false" aria-hidden="true" />
+                    <span class="boss-label" aria-hidden="true"><strong>老板</strong><small>会议厅</small></span>
+                  </button>
+                </div>
+
+                <div class="empty-office" id="emptyOffice" hidden>
+                  <div class="empty-mascot" aria-hidden="true">
+                    <span class="mascot-antenna"></span>
+                    <span class="mascot-head"><i></i><i></i><b></b></span>
+                    <span class="mascot-body"></span>
+                  </div>
+                  <div class="empty-copy">
+                    <span class="empty-kicker">OFFICE IS READY</span>
+                    <h2>等第一位 Codex 同事来上班</h2>
+                    <p>新建或继续一个 Codex 会话，它会自动出现在工位上。页面每 2 秒刷新一次，无需手动操作。</p>
+                    <div class="empty-steps">
+                      <span><b>1</b>打开会话</span><i></i><span><b>2</b>角色入场</span><i></i><span><b>3</b>点击巡视</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="night-overlay" aria-hidden="true">
+                  <i class="star star-a"></i><i class="star star-b"></i><i class="star star-c"></i>
+                </div>
+              </div>
+              <div class="drag-hint" id="dragHint"><span>✥</span> 拖动画布巡视 · 滚轮缩放</div>
+            </div>
+          </div>
+
+          <div class="office-footer">
+            <div class="status-legend" aria-label="状态与工位类型图例">
+              <span class="legend-working"><i aria-hidden="true"></i>编写</span>
+              <span class="legend-thinking"><i aria-hidden="true"></i>思考</span>
+              <span class="legend-tool"><i aria-hidden="true"></i>工具</span>
+              <span class="legend-waiting"><i aria-hidden="true"></i>等待</span>
+              <span class="legend-idle"><i aria-hidden="true"></i>空闲</span>
+              <span class="legend-divider" aria-hidden="true"></span>
+              <span class="legend-role legend-main"><i aria-hidden="true"></i>主会话工位</span>
+              <span class="legend-role legend-subagent"><i aria-hidden="true"></i>子代理工位</span>
+            </div>
+            <span class="updated-time" id="updatedTime">尚未同步</span>
+          </div>
+        </section>
+
+        <aside class="detail-panel" id="detailPanel" aria-label="会话详情">
+          <div class="panel-grabber" aria-hidden="true"></div>
+          <div class="detail-placeholder" id="detailPlaceholder">
+            <div class="placeholder-orbit" aria-hidden="true">
+              <span class="orbit-core">C</span><i></i><i></i><i></i>
+            </div>
+            <p class="eyebrow">INSPECT MODE</p>
+            <h2>选择一位同事</h2>
+            <p>点击办公室中的像素小人，查看它正在处理的任务，并直接给对应 Codex 会话发送消息。</p>
+            <div class="placeholder-tip"><kbd>CLICK</kbd><span>像老板一样巡视每个工位</span></div>
+          </div>
+
+          <article class="session-detail" id="sessionDetail" hidden>
+            <button class="detail-close" id="detailClose" type="button" aria-label="关闭会话详情">×</button>
+            <header class="detail-header">
+              <div class="detail-avatar" id="detailAvatar" aria-hidden="true"></div>
+              <div>
+                <div class="detail-badges">
+                  <span class="session-kind" id="detailKind">主会话</span>
+                  <span class="detail-status" id="detailStatus"><i></i><span>工作中</span></span>
+                </div>
+                <h2 id="detailTitle">Untitled session</h2>
+                <span class="detail-id" id="detailId">#--------</span>
+              </div>
+            </header>
+
+            <section class="session-chat" id="sessionChat" aria-labelledby="chatHeading">
+              <header class="chat-header">
+                <div>
+                  <span class="chat-kicker">DIRECT LINE</span>
+                  <h3 id="chatHeading">和这位同事对话</h3>
+                </div>
+                <span class="chat-status" id="chatStatus" role="status" aria-live="polite">就绪</span>
+              </header>
+
+              <div class="chat-model-row">
+                <label for="chatModelSelect">AI 模型</label>
+                <div class="chat-model-control">
+                  <select id="chatModelSelect" aria-describedby="chatModelStatus" disabled>
+                    <option value="">正在读取可用模型…</option>
+                  </select>
+                  <i aria-hidden="true"></i>
+                </div>
+                <small id="chatModelStatus" role="status" aria-live="polite">正在读取可用模型…</small>
+              </div>
+
+              <div class="chat-log" id="chatLog" role="log" aria-live="polite" aria-relevant="additions" aria-busy="false" tabindex="0">
+                <p class="chat-empty">这里会显示本次软件内的对话。发送消息后，Codex CLI 的公开活动摘要也会出现在这里。</p>
+              </div>
+
+              <p class="chat-permission-note" id="chatPermissionNote"><i aria-hidden="true">!</i>回复可能执行该会话配置允许的工具。</p>
+
+              <form class="chat-form" id="chatForm" novalidate>
+                <label class="sr-only" for="chatInput">发送给当前 Codex 会话的消息</label>
+                <textarea id="chatInput" name="message" rows="2" maxlength="12000" autocomplete="off" spellcheck="true" aria-describedby="chatHint chatPermissionNote" placeholder="给这位同事安排工作…"></textarea>
+                <div class="chat-form-footer">
+                  <small id="chatHint">Enter 发送 · Shift+Enter 换行</small>
+                  <button class="pixel-button chat-send" id="chatSend" type="submit" disabled>
+                    <span>发送</span><i aria-hidden="true">↗</i>
+                  </button>
+                </div>
+              </form>
+              <p class="sr-only" id="chatAnnouncer" aria-live="polite"></p>
+            </section>
+
+            <section class="activity-card">
+              <div class="activity-card-label"><span>当前动态</span><i></i></div>
+              <p id="detailActivity">正在观察任务上下文…</p>
+              <div class="activity-meter"><i id="activityMeter"></i></div>
+            </section>
+
+            <dl class="metadata-list">
+              <div>
+                <dt>模型</dt>
+                <dd id="detailModel">—</dd>
+              </div>
+              <div>
+                <dt>工作目录</dt>
+                <dd id="detailCwd" title="">—</dd>
+              </div>
+              <div>
+                <dt>来源</dt>
+                <dd id="detailSource">—</dd>
+              </div>
+              <div>
+                <dt>当前动作</dt>
+                <dd id="detailAction">—</dd>
+              </div>
+              <div id="roleRow" hidden>
+                <dt>代理角色</dt>
+                <dd id="detailRole">—</dd>
+              </div>
+              <div>
+                <dt>最近活动</dt>
+                <dd id="detailAge">—</dd>
+              </div>
+              <div id="parentRow" hidden>
+                <dt>父会话</dt>
+                <dd id="detailParent">—</dd>
+              </div>
+            </dl>
+
+            <div class="detail-timeline">
+              <span class="timeline-dot"></span>
+              <div><b>已连接到办公室</b><small id="detailUpdated">—</small></div>
+            </div>
+          </article>
+
+          <div class="panel-footer">
+            <span><i class="privacy-dot"></i>本机 Codex CLI · 权限沿用会话配置</span>
+            <span id="sessionWindow">活跃窗口 —</span>
+          </div>
+        </aside>
+      </main>
+    </div>
+
+    <template id="workstationTemplate">
+      <div class="workstation">
+        <div class="desk-shadow"></div>
+        <div class="desk">
+          <span class="monitor"><i></i><b></b></span>
+          <span class="keyboard"></span>
+          <span class="desk-lamp"><i></i></span>
+          <span class="desk-note"></span>
+        </div>
+        <div class="office-chair"><i></i><b></b></div>
+      </div>
+    </template>
+
+    <template id="agentTemplate">
+      <button class="agent status-idle" type="button">
+        <span class="agent-bubble" aria-hidden="true"></span>
+        <span class="agent-fx" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="worker-figure" aria-hidden="true">
+          <span class="worker-shadow"></span>
+          <span class="css-worker">
+            <span class="worker-hair"></span>
+            <span class="worker-head"><i></i><i></i></span>
+            <span class="worker-body"></span>
+            <span class="worker-arm arm-left"></span>
+            <span class="worker-arm arm-right"></span>
+            <span class="worker-leg leg-left"></span>
+            <span class="worker-leg leg-right"></span>
+          </span>
+          <img class="worker-sprite" alt="" draggable="false" />
+          <span class="coffee-cup"><i></i></span>
+          <span class="action-prop" aria-hidden="true"><i></i><b></b></span>
+        </span>
+        <span class="agent-label">
+          <span class="agent-type-mark" aria-hidden="true"></span>
+          <strong class="agent-name"></strong>
+          <small class="agent-state"></small>
+        </span>
+      </button>
+    </template>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>
