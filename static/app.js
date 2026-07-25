@@ -2,7 +2,9 @@
   "use strict";
 
   const API_URL = "/api/sessions";
+  const HISTORY_API_URL = "/api/sessions/history";
   const CHAT_API_URL = "/api/chat";
+  const NEW_CHAT_API_URL = "/api/chat/new";
   const MODELS_API_URL = "/api/chat/models";
   const POLL_MS = 2000;
   const BASE_SCENE_WIDTH = 1600;
@@ -133,6 +135,30 @@
     chatAnnouncer: $("#chatAnnouncer"),
     chatModelSelect: $("#chatModelSelect"),
     chatModelStatus: $("#chatModelStatus"),
+    overtimeButton: $("#overtimeButton"),
+    overtimeModal: $("#overtimeModal"),
+    overtimeDialog: $("#overtimeDialog"),
+    overtimeClose: $("#overtimeClose"),
+    overtimeForm: $("#overtimeForm"),
+    overtimeNewPanel: $("#overtimeNewPanel"),
+    overtimeHistoryPanel: $("#overtimeHistoryPanel"),
+    overtimeCwd: $("#overtimeCwd"),
+    overtimeSearch: $("#overtimeSearch"),
+    overtimeHistoryStatus: $("#overtimeHistoryStatus"),
+    overtimeHistoryList: $("#overtimeHistoryList"),
+    overtimeModel: $("#overtimeModel"),
+    overtimeModelHint: $("#overtimeModelHint"),
+    overtimeMessage: $("#overtimeMessage"),
+    overtimeMessageLabel: $("#overtimeMessageLabel"),
+    overtimeProgress: $("#overtimeProgress"),
+    overtimeProgressTitle: $("#overtimeProgressTitle"),
+    overtimeProgressState: $("#overtimeProgressState"),
+    overtimeProgressLog: $("#overtimeProgressLog"),
+    overtimeError: $("#overtimeError"),
+    overtimeFootnote: $("#overtimeFootnote"),
+    overtimeCancel: $("#overtimeCancel"),
+    overtimeSubmit: $("#overtimeSubmit"),
+    overtimeAnnouncer: $("#overtimeAnnouncer"),
     bossNpc: $("#bossNpc"),
     bossBubble: $("#bossBubble"),
     bossSprite: $("#bossSprite"),
@@ -175,6 +201,23 @@
     roamingPreferenceExplicit: false,
     hasLoaded: false,
     databaseAvailable: true,
+    pendingSelectionId: null,
+    overtime: {
+      mode: "new",
+      open: false,
+      sending: false,
+      history: [],
+      historyLoading: false,
+      historyError: "",
+      historySelectedId: "",
+      historyController: null,
+      historyTimer: 0,
+      controller: null,
+      chat: null,
+      sessionId: "",
+      modelSelection: "",
+      returnFocus: null,
+    },
     sceneWidth: BASE_SCENE_WIDTH,
     sceneHeight: BASE_SCENE_HEIGHT,
     view: { x: 0, y: 0, scale: 1, fitted: false, userMoved: false },
@@ -1290,6 +1333,7 @@
     state.modelsLoading = true;
     state.modelsError = "";
     if (state.selectedId) renderModelSelector(state.selectedId, false);
+    if (state.overtime.open) renderOvertimeModelSelector();
     try {
       const response = await fetch(MODELS_API_URL, { cache: "no-store", credentials: "same-origin" });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1309,23 +1353,28 @@
       state.modelsLoading = false;
       state.modelsVersion += 1;
       if (state.selectedId) renderModelSelector(state.selectedId, true);
+      if (state.overtime.open) renderOvertimeModelSelector();
     }
+  }
+
+  function createChatState() {
+    return {
+      messages: [],
+      draft: "",
+      sending: false,
+      statusText: "就绪",
+      statusKind: "idle",
+      assistantIndex: -1,
+      controller: null,
+      doneSeen: false,
+      hadError: false,
+    };
   }
 
   function chatStateFor(sessionId) {
     let chat = state.chats.get(sessionId);
     if (!chat) {
-      chat = {
-        messages: [],
-        draft: "",
-        sending: false,
-        statusText: "就绪",
-        statusKind: "idle",
-        assistantIndex: -1,
-        controller: null,
-        doneSeen: false,
-        hadError: false,
-      };
+      chat = createChatState();
       state.chats.set(sessionId, chat);
     }
     return chat;
@@ -1581,17 +1630,21 @@
     return false;
   }
 
-  function parseChatPayload(sessionId, chat, payload) {
+  function parseChatPayload(sessionId, chat, payload, onEvent) {
     if (Array.isArray(payload)) {
       let handled = false;
-      payload.forEach((event) => { handled = processChatEvent(sessionId, chat, event) || handled; });
+      payload.forEach((event) => {
+        if (typeof onEvent === "function") onEvent(event);
+        handled = processChatEvent(sessionId, chat, event) || handled;
+      });
       return handled;
     }
-    if (payload && Array.isArray(payload.events)) return parseChatPayload(sessionId, chat, payload.events);
+    if (payload && Array.isArray(payload.events)) return parseChatPayload(sessionId, chat, payload.events, onEvent);
+    if (typeof onEvent === "function") onEvent(payload);
     return processChatEvent(sessionId, chat, payload);
   }
 
-  async function consumeChatResponse(sessionId, chat, response) {
+  async function consumeChatResponse(sessionId, chat, response, onEvent) {
     let buffer = "";
     let handled = false;
     let malformed = 0;
@@ -1601,7 +1654,7 @@
       if (line.startsWith("data:")) line = line.slice(5).trim();
       if (!line || line === "[DONE]") return;
       try {
-        handled = parseChatPayload(sessionId, chat, JSON.parse(line)) || handled;
+        handled = parseChatPayload(sessionId, chat, JSON.parse(line), onEvent) || handled;
       } catch (_) {
         malformed += 1;
       }
@@ -1620,7 +1673,7 @@
     if (!canStream) {
       const complete = await response.text();
       try {
-        handled = parseChatPayload(sessionId, chat, JSON.parse(complete)) || handled;
+        handled = parseChatPayload(sessionId, chat, JSON.parse(complete), onEvent) || handled;
       } catch (_) {
         consumeChunk(complete, true);
       }
@@ -1648,6 +1701,9 @@
         const knownErrors = {
           session_busy: "这个会话仍在回复，请稍后再发送。",
           global_busy: "同时进行的 Codex 对话太多，请稍后再试。",
+          invalid_cwd: "工作目录不存在或无法访问，请检查后重试。",
+          invalid_model: "所选模型标识无效，请重新选择。",
+          model_not_allowed: "服务器不允许使用所选模型。",
         };
         if (knownErrors[code]) return knownErrors[code];
         if (response.status === 404) return "这个 Codex 会话已不存在或已经归档。";
@@ -1724,6 +1780,501 @@
         announceChat(chat.hadError ? "消息发送失败。" : "Codex 回复完成。" );
         focusChatInput(sessionId, true);
       }
+    }
+  }
+
+  function selectedOvertimeHistorySession() {
+    return state.overtime.history.find(
+      (session) => session.id === state.overtime.historySelectedId,
+    ) || null;
+  }
+
+  function overtimeDefaultCwd() {
+    const selected = state.sessions.find((session) => session.id === state.selectedId);
+    if (selected && selected.cwd) return selected.cwd;
+    const active = state.sessions.find((session) => session.cwd);
+    return active ? active.cwd : "";
+  }
+
+  function renderOvertimeModelSelector() {
+    if (!elements.overtimeModel) return;
+    const fragment = document.createDocumentFragment();
+    const inherited = document.createElement("option");
+    inherited.value = "";
+    inherited.textContent = state.overtime.mode === "history"
+      ? "沿用旧会话模型"
+      : "使用 Codex 默认模型";
+    fragment.append(inherited);
+    state.models.forEach((model) => {
+      const option = document.createElement("option");
+      option.value = model.id;
+      option.textContent = model.id === state.defaultModel
+        ? `${model.label}（默认）`
+        : model.label;
+      fragment.append(option);
+    });
+    elements.overtimeModel.replaceChildren(fragment);
+    const desired = state.overtime.modelSelection;
+    elements.overtimeModel.value = state.models.some((model) => model.id === desired)
+      ? desired
+      : "";
+    elements.overtimeModel.disabled = state.overtime.sending
+      || state.modelsLoading
+      || !state.models.length;
+    elements.overtimeModel.setAttribute("aria-busy", String(state.modelsLoading));
+    if (state.modelsLoading) {
+      elements.overtimeModelHint.textContent = "正在读取本机 Codex 可用模型…";
+    } else if (state.modelsError || !state.models.length) {
+      elements.overtimeModelHint.textContent = state.overtime.mode === "history"
+        ? "模型列表不可用，将沿用旧会话配置。"
+        : "模型列表不可用，将使用 Codex 默认配置。";
+    } else {
+      elements.overtimeModelHint.textContent = state.overtime.mode === "history"
+        ? "不选择时沿用旧会话模型；也可以为这次回复指定其他模型。"
+        : "不选择时使用 Codex 默认模型。";
+    }
+  }
+
+  function setOvertimeError(message) {
+    const text = compactPublicText(message, 600);
+    elements.overtimeError.hidden = !text;
+    elements.overtimeError.textContent = text;
+  }
+
+  function announceOvertime(message) {
+    elements.overtimeAnnouncer.textContent = "";
+    requestAnimationFrame(() => { elements.overtimeAnnouncer.textContent = message; });
+  }
+
+  function renderOvertimeProgress() {
+    const chat = state.overtime.chat;
+    if (!chat) {
+      elements.overtimeProgress.hidden = true;
+      elements.overtimeProgressLog.replaceChildren();
+      return;
+    }
+    elements.overtimeProgress.hidden = false;
+    elements.overtimeProgressLog.setAttribute("aria-busy", String(state.overtime.sending));
+    elements.overtimeProgressTitle.textContent = state.overtime.mode === "history"
+      ? "正在叫回这位同事…"
+      : "正在安排新同事入场…";
+    elements.overtimeProgressState.textContent = chat.statusText || "处理中";
+    elements.overtimeProgressState.classList.toggle("is-error", chat.statusKind === "error");
+    elements.overtimeProgressState.classList.toggle("is-done", chat.statusKind === "done");
+    const fragment = document.createDocumentFragment();
+    chat.messages.forEach((message) => fragment.append(createChatMessageNode(message)));
+    if (state.overtime.sending) fragment.append(createChatPendingNode(chat.statusText));
+    elements.overtimeProgressLog.replaceChildren(fragment);
+    requestAnimationFrame(() => {
+      elements.overtimeProgressLog.scrollTop = elements.overtimeProgressLog.scrollHeight;
+    });
+  }
+
+  function updateOvertimeForm() {
+    const selectedHistory = selectedOvertimeHistorySession();
+    const message = String(elements.overtimeMessage.value || "").trim();
+    const hasTarget = state.overtime.mode === "new"
+      ? Boolean(String(elements.overtimeCwd.value || "").trim())
+      : Boolean(selectedHistory) && !state.overtime.historyLoading;
+    elements.overtimeSubmit.disabled = state.overtime.sending || !message || !hasTarget;
+    const submitLabel = $("span", elements.overtimeSubmit);
+    if (submitLabel) {
+      submitLabel.textContent = state.overtime.sending
+        ? "联系中"
+        : state.overtime.mode === "history"
+          ? "叫回来继续聊"
+          : "创建并开工";
+    }
+    elements.overtimeCancel.textContent = state.overtime.sending ? "停止" : "取消";
+    [
+      elements.overtimeCwd,
+      elements.overtimeSearch,
+      elements.overtimeMessage,
+      ...$$(".overtime-tab", elements.overtimeDialog),
+      ...$$("input[type='radio']", elements.overtimeHistoryList),
+    ].forEach((control) => {
+      if (control) control.disabled = state.overtime.sending;
+    });
+    renderOvertimeModelSelector();
+  }
+
+  function renderOvertimeHistory() {
+    elements.overtimeHistoryList.setAttribute("aria-busy", String(state.overtime.historyLoading));
+    elements.overtimeHistoryStatus.classList.toggle("is-error", Boolean(state.overtime.historyError));
+    if (state.overtime.historyLoading) {
+      elements.overtimeHistoryStatus.textContent = "正在读取本机历史会话…";
+    } else if (state.overtime.historyError) {
+      elements.overtimeHistoryStatus.textContent = state.overtime.historyError;
+    } else {
+      const count = state.overtime.history.length;
+      elements.overtimeHistoryStatus.textContent = count
+        ? `找到 ${count} 个未归档会话，选择一位继续对话。`
+        : "没有找到匹配的未归档会话。";
+    }
+
+    const fragment = document.createDocumentFragment();
+    if (!state.overtime.history.length) {
+      const empty = document.createElement("p");
+      empty.className = "overtime-history-empty";
+      empty.textContent = state.overtime.historyLoading
+        ? "正在翻阅会话记录…"
+        : state.overtime.historyError
+          ? "暂时无法读取历史会话，请稍后重试。"
+          : "换个关键词试试，或创建一个新会话。";
+      fragment.append(empty);
+    } else {
+      state.overtime.history.forEach((session) => {
+        const label = document.createElement("label");
+        label.className = "overtime-history-item";
+        const selected = session.id === state.overtime.historySelectedId;
+        label.classList.toggle("is-selected", selected);
+        label.title = session.cwd || session.title;
+
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "overtime_history_session";
+        radio.value = session.id;
+        radio.checked = selected;
+        radio.disabled = state.overtime.sending;
+
+        const copy = document.createElement("span");
+        copy.className = "overtime-history-copy";
+        const title = document.createElement("strong");
+        title.textContent = session.agent_nickname
+          ? `${session.agent_nickname} · ${session.title}`
+          : session.title;
+        const detail = document.createElement("small");
+        detail.textContent = `${session.cwd || "工作目录未知"} · #${session.short_id}`;
+        copy.append(title, detail);
+
+        const metadata = document.createElement("span");
+        metadata.className = "overtime-history-meta";
+        const presence = document.createElement("b");
+        presence.classList.toggle("is-away", !session.is_active);
+        presence.textContent = session.is_active ? "在岗" : "已下班";
+        const age = document.createElement("span");
+        age.textContent = formatAge(session.age_seconds);
+        metadata.append(presence, age);
+        label.append(radio, copy, metadata);
+        radio.addEventListener("change", () => {
+          if (!radio.checked || state.overtime.sending) return;
+          state.overtime.historySelectedId = session.id;
+          state.overtime.modelSelection = "";
+          setOvertimeError("");
+          renderOvertimeHistory();
+          updateOvertimeForm();
+        });
+        fragment.append(label);
+      });
+    }
+    elements.overtimeHistoryList.replaceChildren(fragment);
+    updateOvertimeForm();
+  }
+
+  async function fetchOvertimeHistory() {
+    if (!state.overtime.open || state.overtime.mode !== "history") return;
+    if (state.overtime.historyController) state.overtime.historyController.abort();
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    state.overtime.historyController = controller;
+    state.overtime.historyLoading = true;
+    state.overtime.historyError = "";
+    renderOvertimeHistory();
+    const query = String(elements.overtimeSearch.value || "").trim().slice(0, 200);
+    try {
+      const response = await fetch(
+        `${HISTORY_API_URL}?q=${encodeURIComponent(query)}&limit=50`,
+        {
+          cache: "no-store",
+          credentials: "same-origin",
+          signal: controller ? controller.signal : undefined,
+        },
+      );
+      if (!response.ok) throw new Error(`历史会话请求失败（HTTP ${response.status}）。`);
+      const payload = await response.json();
+      if (payload && payload.database_available === false) {
+        throw new Error(payload.warning || "Codex 会话数据库暂时不可用。");
+      }
+      const rawSessions = payload && Array.isArray(payload.sessions) ? payload.sessions : [];
+      state.overtime.history = rawSessions.map((raw, index) => {
+        const normalized = normalizeSession(
+          {
+            ...raw,
+            status: raw && raw.is_active ? "waiting" : "idle",
+            activity: "Waiting for input",
+          },
+          index,
+        );
+        normalized.is_active = Boolean(raw && raw.is_active);
+        return normalized;
+      });
+      const preferred = state.overtime.historySelectedId || state.selectedId;
+      state.overtime.historySelectedId = state.overtime.history.some(
+        (session) => session.id === preferred,
+      )
+        ? preferred
+        : state.overtime.history[0] ? state.overtime.history[0].id : "";
+    } catch (error) {
+      if (error && error.name === "AbortError") return;
+      state.overtime.history = [];
+      state.overtime.historySelectedId = "";
+      state.overtime.historyError = compactPublicText(
+        error && error.message,
+        320,
+      ) || "无法读取历史会话。";
+    } finally {
+      if (state.overtime.historyController === controller) {
+        state.overtime.historyController = null;
+        state.overtime.historyLoading = false;
+        if (state.overtime.open && state.overtime.mode === "history") renderOvertimeHistory();
+      }
+    }
+  }
+
+  function resetOvertimeRun() {
+    state.overtime.chat = null;
+    state.overtime.sessionId = "";
+    setOvertimeError("");
+    renderOvertimeProgress();
+  }
+
+  function setOvertimeMode(mode, focusTarget = true) {
+    if (state.overtime.sending) return;
+    state.overtime.mode = mode === "history" ? "history" : "new";
+    $$(".overtime-tab", elements.overtimeDialog).forEach((tab) => {
+      const active = tab.dataset.overtimeMode === state.overtime.mode;
+      tab.classList.toggle("is-active", active);
+      tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
+    });
+    elements.overtimeNewPanel.hidden = state.overtime.mode !== "new";
+    elements.overtimeHistoryPanel.hidden = state.overtime.mode !== "history";
+    elements.overtimeMessageLabel.textContent = state.overtime.mode === "history"
+      ? "继续说点什么"
+      : "第一项加班任务";
+    elements.overtimeMessage.placeholder = state.overtime.mode === "history"
+      ? "接着上次的上下文继续安排任务…"
+      : "告诉新同事要处理什么…";
+    elements.overtimeFootnote.textContent = state.overtime.mode === "history"
+      ? "发送后，这位同事会重新出现在办公室。"
+      : "完成后，新同事会自动出现在办公室。";
+    state.overtime.modelSelection = state.overtime.mode === "new"
+      ? (state.defaultModel || "")
+      : "";
+    resetOvertimeRun();
+    updateOvertimeForm();
+    if (state.overtime.mode === "history") fetchOvertimeHistory();
+    if (focusTarget) {
+      requestAnimationFrame(() => {
+        const target = state.overtime.mode === "history"
+          ? elements.overtimeSearch
+          : elements.overtimeCwd;
+        try { target.focus({ preventScroll: true }); }
+        catch (_) { target.focus(); }
+      });
+    }
+  }
+
+  function openOvertime() {
+    if (state.overtime.open) return;
+    state.overtime.open = true;
+    state.overtime.returnFocus = document.activeElement;
+    elements.overtimeModal.hidden = false;
+    elements.overtimeModal.setAttribute("aria-hidden", "false");
+    $(".app-shell").inert = true;
+    document.body.classList.add("is-modal-open");
+    if (!elements.overtimeCwd.value) elements.overtimeCwd.value = overtimeDefaultCwd();
+    setOvertimeMode(state.overtime.mode, false);
+    if (!state.modelsLoading && !state.models.length) fetchModels();
+    requestAnimationFrame(() => {
+      const target = state.overtime.mode === "history"
+        ? elements.overtimeSearch
+        : elements.overtimeCwd;
+      try { target.focus({ preventScroll: true }); }
+      catch (_) { elements.overtimeDialog.focus(); }
+    });
+  }
+
+  function closeOvertime(abortRequest = true) {
+    if (!state.overtime.open) return;
+    if (abortRequest && state.overtime.controller) state.overtime.controller.abort();
+    if (state.overtime.historyController) state.overtime.historyController.abort();
+    window.clearTimeout(state.overtime.historyTimer);
+    state.overtime.historyTimer = 0;
+    state.overtime.open = false;
+    elements.overtimeModal.hidden = true;
+    elements.overtimeModal.setAttribute("aria-hidden", "true");
+    $(".app-shell").inert = false;
+    document.body.classList.remove("is-modal-open");
+    const target = state.overtime.returnFocus;
+    state.overtime.returnFocus = null;
+    if (target && typeof target.focus === "function") {
+      requestAnimationFrame(() => {
+        try { target.focus({ preventScroll: true }); }
+        catch (_) { target.focus(); }
+      });
+    }
+  }
+
+  function requestSessionRefresh() {
+    if (state.pollInFlight) state.pollRefreshRequested = true;
+    else fetchSessions();
+  }
+
+  async function submitOvertime() {
+    if (state.overtime.sending) return;
+    const mode = state.overtime.mode;
+    const message = String(elements.overtimeMessage.value || "").trim().slice(0, 12000);
+    const selectedHistory = selectedOvertimeHistorySession();
+    const cwd = String(elements.overtimeCwd.value || "").trim();
+    if (!message) {
+      setOvertimeError("请先写下要交代的加班任务。");
+      elements.overtimeMessage.focus();
+      return;
+    }
+    if (mode === "new" && !cwd) {
+      setOvertimeError("请输入新会话要使用的工作目录。");
+      elements.overtimeCwd.focus();
+      return;
+    }
+    if (mode === "history" && !selectedHistory) {
+      setOvertimeError("请先选择一个以前的会话。");
+      elements.overtimeSearch.focus();
+      return;
+    }
+
+    const targetId = mode === "history" ? selectedHistory.id : "";
+    const chat = mode === "history" ? chatStateFor(targetId) : createChatState();
+    if (chat.sending) {
+      setOvertimeError("这个会话仍在回复，请稍后再叫它回来。");
+      return;
+    }
+    appendChatItem(chat, "user", message);
+    chat.draft = "";
+    chat.sending = true;
+    chat.statusText = mode === "history" ? "正在叫回旧会话…" : "正在创建新会话…";
+    chat.statusKind = "sending";
+    chat.assistantIndex = -1;
+    chat.doneSeen = false;
+    chat.hadError = false;
+    state.overtime.chat = chat;
+    state.overtime.sessionId = targetId;
+    state.overtime.sending = true;
+    state.overtime.controller = typeof AbortController === "function" ? new AbortController() : null;
+    setOvertimeError("");
+    updateOvertimeForm();
+    renderOvertimeProgress();
+    announceOvertime(mode === "history" ? "正在叫回旧会话。" : "正在创建新会话。");
+
+    let succeeded = false;
+    try {
+      const payload = { message };
+      let endpoint = CHAT_API_URL;
+      if (mode === "history") payload.session_id = targetId;
+      else {
+        endpoint = NEW_CHAT_API_URL;
+        payload.cwd = cwd;
+      }
+      const selectedModel = state.overtime.modelSelection;
+      if (selectedModel) payload.model = selectedModel;
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/x-ndjson" },
+        credentials: "same-origin",
+        body: JSON.stringify(payload),
+        signal: state.overtime.controller ? state.overtime.controller.signal : undefined,
+      });
+      if (!response.ok) throw new Error(await httpChatError(response));
+      const streamKey = targetId || `overtime-new-${Date.now()}`;
+      await consumeChatResponse(streamKey, chat, response, (event) => {
+        const sessionId = event && typeof event.session_id === "string"
+          ? event.session_id
+          : "";
+        if (/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/.test(sessionId)) {
+          state.overtime.sessionId = sessionId;
+        }
+        requestAnimationFrame(() => {
+          if (state.overtime.open) renderOvertimeProgress();
+        });
+      });
+      if (!chat.hadError && chat.assistantIndex < 0) {
+        throw new Error("Codex CLI 没有返回可显示的回复。请稍后重试。");
+      }
+      if (chat.hadError) {
+        const lastError = [...chat.messages].reverse().find((item) => item.role === "error");
+        setOvertimeError(lastError ? lastError.content : "Codex 未能完成这次请求。");
+      } else {
+        const resolvedId = targetId || state.overtime.sessionId;
+        if (!resolvedId) throw new Error("Codex 已回复，但没有返回新会话 ID。");
+        if (!chat.doneSeen) {
+          chat.statusText = "回复完成";
+          chat.statusKind = "done";
+        }
+        if (mode === "new") state.chats.set(resolvedId, chat);
+        if (selectedModel) state.modelSelections.set(resolvedId, selectedModel);
+        state.pendingSelectionId = resolvedId;
+        state.overtime.sessionId = resolvedId;
+        succeeded = true;
+        elements.overtimeMessage.value = "";
+        requestSessionRefresh();
+      }
+    } catch (error) {
+      const rawError = compactPublicText(error && error.message, 600);
+      const cancelled = error && error.name === "AbortError";
+      const messageText = cancelled
+        ? "已停止这次加班呼叫。"
+        : error instanceof TypeError && /fetch|network|load/i.test(rawError)
+          ? "无法连接 Codex CLI，请稍后重试。"
+          : rawError || "无法连接 Codex CLI，请稍后重试。";
+      if (!chat.hadError) appendChatItem(chat, "error", messageText);
+      chat.hadError = true;
+      chat.statusText = cancelled ? "已停止" : "呼叫失败";
+      chat.statusKind = "error";
+      if (state.overtime.open) setOvertimeError(messageText);
+    } finally {
+      chat.sending = false;
+      chat.controller = null;
+      chat.assistantIndex = -1;
+      state.overtime.sending = false;
+      state.overtime.controller = null;
+      const resolvedId = state.overtime.sessionId || targetId;
+      if (resolvedId && state.selectedId === resolvedId) renderChat(resolvedId, true);
+      if (state.overtime.open) {
+        updateOvertimeForm();
+        renderOvertimeProgress();
+        announceOvertime(succeeded ? "会话已就绪，正在进入办公室。" : "加班呼叫未完成。");
+      }
+    }
+
+    if (succeeded && state.overtime.open) {
+      window.setTimeout(() => {
+        if (state.overtime.open && !state.overtime.sending) closeOvertime(false);
+      }, 650);
+    }
+  }
+
+  function handleOvertimeKeydown(event) {
+    if (!state.overtime.open) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeOvertime(true);
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = $$(`button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])`, elements.overtimeDialog)
+      .filter((node) => !node.hidden && node.offsetParent !== null);
+    if (!focusable.length) {
+      event.preventDefault();
+      elements.overtimeDialog.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
     }
   }
 
@@ -1832,10 +2383,26 @@
       const payload = await response.json();
       const rawSessions = Array.isArray(payload) ? payload : (Array.isArray(payload.sessions) ? payload.sessions : []);
       state.sessions = rawSessions.map(normalizeSession);
+      let selectedPendingSession = false;
+      if (
+        state.pendingSelectionId
+        && state.sessions.some((session) => session.id === state.pendingSelectionId)
+      ) {
+        state.selectedId = state.pendingSelectionId;
+        state.pendingSelectionId = null;
+        state.filter = "all";
+        $$(".filter-button").forEach((button) => {
+          const active = button.dataset.filter === "all";
+          button.classList.toggle("is-active", active);
+          button.setAttribute("aria-pressed", String(active));
+        });
+        selectedPendingSession = true;
+      }
       state.hasLoaded = true;
       const databaseAvailable = Array.isArray(payload) ? true : payload.database_available !== false;
       state.databaseAvailable = databaseAvailable;
       renderSessions(databaseAvailable);
+      if (selectedPendingSession && state.selectedId) focusChatInput(state.selectedId, true);
       const count = state.sessions.length;
       const warning = !Array.isArray(payload) && payload.warning ? String(payload.warning) : "";
       if (!databaseAvailable) setConnection("error", "会话数据库不可用");
@@ -1973,6 +2540,49 @@
   }
 
   function bindControls() {
+    elements.overtimeButton.addEventListener("click", openOvertime);
+    elements.overtimeClose.addEventListener("click", () => closeOvertime(true));
+    elements.overtimeCancel.addEventListener("click", () => closeOvertime(true));
+    $("[data-overtime-close]", elements.overtimeModal).addEventListener("click", () => closeOvertime(true));
+    $$(".overtime-tab", elements.overtimeDialog).forEach((tab) => {
+      tab.addEventListener("click", () => setOvertimeMode(tab.dataset.overtimeMode));
+      tab.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.preventDefault();
+        setOvertimeMode(tab.dataset.overtimeMode === "new" ? "history" : "new");
+      });
+    });
+    elements.overtimeForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitOvertime();
+    });
+    elements.overtimeCwd.addEventListener("input", () => {
+      setOvertimeError("");
+      updateOvertimeForm();
+    });
+    elements.overtimeMessage.addEventListener("input", () => {
+      setOvertimeError("");
+      updateOvertimeForm();
+    });
+    elements.overtimeMessage.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey) || event.isComposing) return;
+      event.preventDefault();
+      if (typeof elements.overtimeForm.requestSubmit === "function") elements.overtimeForm.requestSubmit();
+      else elements.overtimeForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    elements.overtimeModel.addEventListener("change", () => {
+      state.overtime.modelSelection = elements.overtimeModel.value;
+      updateOvertimeForm();
+    });
+    elements.overtimeSearch.addEventListener("input", () => {
+      window.clearTimeout(state.overtime.historyTimer);
+      state.overtime.historyTimer = window.setTimeout(() => {
+        state.overtime.historyTimer = 0;
+        fetchOvertimeHistory();
+      }, 280);
+    });
+    document.addEventListener("keydown", handleOvertimeKeydown);
+
     $$(".filter-button").forEach((button) => {
       button.addEventListener("click", () => {
         state.filter = button.dataset.filter;

@@ -30,6 +30,10 @@
         </div>
 
         <div class="topbar-actions">
+          <button class="pixel-button overtime-button" id="overtimeButton" type="button" aria-haspopup="dialog" aria-controls="overtimeModal">
+            <span class="overtime-button-icon" aria-hidden="true">＋</span>
+            <span class="button-label">叫人来加班</span>
+          </button>
           <button class="pixel-button theme-toggle" id="themeToggle" type="button" aria-label="切换昼夜氛围" aria-pressed="false">
             <span class="theme-icon sun-icon" aria-hidden="true">☀</span>
             <span class="theme-icon moon-icon" aria-hidden="true">☾</span>
@@ -308,6 +312,91 @@
           </div>
         </aside>
       </main>
+    </div>
+
+    <div class="overtime-modal" id="overtimeModal" hidden aria-hidden="true">
+      <div class="overtime-backdrop" data-overtime-close aria-hidden="true"></div>
+      <section class="overtime-dialog" id="overtimeDialog" role="dialog" aria-modal="true" aria-labelledby="overtimeTitle" aria-describedby="overtimeDescription" tabindex="-1">
+        <header class="overtime-header">
+          <div class="overtime-heading">
+            <span class="overtime-kicker">OVERTIME CALL</span>
+            <h2 id="overtimeTitle">叫人来加班</h2>
+            <p id="overtimeDescription">创建一位新同事，或把以前的 Codex 会话叫回来继续聊。</p>
+          </div>
+          <button class="overtime-close" id="overtimeClose" type="button" aria-label="关闭叫人来加班窗口">×</button>
+        </header>
+
+        <div class="overtime-tabs" role="tablist" aria-label="选择加班会话类型">
+          <button class="overtime-tab is-active" id="overtimeNewTab" type="button" role="tab" aria-selected="true" aria-controls="overtimeNewPanel" data-overtime-mode="new">
+            <span aria-hidden="true">NEW</span> 创建新会话
+          </button>
+          <button class="overtime-tab" id="overtimeHistoryTab" type="button" role="tab" aria-selected="false" aria-controls="overtimeHistoryPanel" data-overtime-mode="history" tabindex="-1">
+            <span aria-hidden="true">BACK</span> 继续旧会话
+          </button>
+        </div>
+
+        <form class="overtime-form" id="overtimeForm" novalidate>
+          <div class="overtime-mode-panel" id="overtimeNewPanel" role="tabpanel" aria-labelledby="overtimeNewTab">
+            <label class="overtime-field" for="overtimeCwd">
+              <span>工作目录</span>
+              <input id="overtimeCwd" name="cwd" type="text" maxlength="4096" autocomplete="off" spellcheck="false" placeholder="例如 C:\Projects\my-app 或 /home/me/my-app" aria-describedby="overtimeCwdHint" required />
+              <small id="overtimeCwdHint">必须是这台电脑上已经存在的文件夹，新会话会从这里开始工作。</small>
+            </label>
+          </div>
+
+          <div class="overtime-mode-panel" id="overtimeHistoryPanel" role="tabpanel" aria-labelledby="overtimeHistoryTab" hidden>
+            <label class="overtime-field overtime-search-field" for="overtimeSearch">
+              <span>搜索以前的同事</span>
+              <span class="overtime-search-control">
+                <i aria-hidden="true">⌕</i>
+                <input id="overtimeSearch" type="search" maxlength="200" autocomplete="off" spellcheck="false" placeholder="按标题、目录、会话 ID 搜索" />
+              </span>
+            </label>
+            <p class="overtime-history-status" id="overtimeHistoryStatus" role="status" aria-live="polite">打开后会读取本机未归档会话。</p>
+            <div class="overtime-history-list" id="overtimeHistoryList" role="radiogroup" aria-label="以前的 Codex 会话" aria-busy="false"></div>
+          </div>
+
+          <label class="overtime-field" for="overtimeModel">
+            <span>AI 模型</span>
+            <span class="overtime-select-control">
+              <select id="overtimeModel" name="model" disabled aria-describedby="overtimeModelHint">
+                <option value="">正在读取可用模型…</option>
+              </select>
+              <i aria-hidden="true"></i>
+            </span>
+            <small id="overtimeModelHint">新会话使用所选模型；旧会话默认沿用原模型。</small>
+          </label>
+
+          <label class="overtime-field" for="overtimeMessage">
+            <span id="overtimeMessageLabel">第一项加班任务</span>
+            <textarea id="overtimeMessage" name="message" rows="4" maxlength="12000" autocomplete="off" spellcheck="true" placeholder="告诉新同事要处理什么…" required aria-describedby="overtimeMessageHint overtimePermissionNote"></textarea>
+            <small id="overtimeMessageHint">最多 12000 字；Ctrl+Enter 或 ⌘+Enter 可立即发送。</small>
+          </label>
+
+          <p class="overtime-permission-note" id="overtimePermissionNote"><i aria-hidden="true">!</i>会调用本机 Codex CLI，并沿用对应会话允许的工具权限。</p>
+
+          <div class="overtime-progress" id="overtimeProgress" hidden>
+            <div class="overtime-progress-head">
+              <span id="overtimeProgressTitle">正在联系 Codex…</span>
+              <span class="overtime-progress-state" id="overtimeProgressState" role="status" aria-live="polite">准备中</span>
+            </div>
+            <div class="overtime-progress-log" id="overtimeProgressLog" role="log" aria-live="polite" aria-relevant="additions" aria-busy="false"></div>
+          </div>
+
+          <p class="overtime-error" id="overtimeError" role="alert" hidden></p>
+
+          <footer class="overtime-footer">
+            <span class="overtime-footnote" id="overtimeFootnote">完成后，新同事会自动出现在办公室。</span>
+            <div>
+              <button class="pixel-button overtime-cancel" id="overtimeCancel" type="button">取消</button>
+              <button class="pixel-button overtime-submit" id="overtimeSubmit" type="submit">
+                <span>创建并开工</span><i aria-hidden="true">↗</i>
+              </button>
+            </div>
+          </footer>
+        </form>
+        <p class="sr-only" id="overtimeAnnouncer" aria-live="assertive"></p>
+      </section>
     </div>
 
     <template id="workstationTemplate">

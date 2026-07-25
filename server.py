@@ -22,12 +22,13 @@ import sys
 import threading
 import time
 import tomllib
+import uuid
 import webbrowser
 from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Iterable, Mapping, Sequence
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 
 DEFAULT_HOST = "127.0.0.1"
@@ -42,6 +43,10 @@ MAX_CHAT_BODY_BYTES = 64 * 1024
 MAX_CHAT_MESSAGE_CHARS = 12_000
 MAX_CHAT_SESSION_ID_CHARS = 256
 MAX_CHAT_MODEL_CHARS = 128
+MAX_CHAT_CWD_CHARS = 4096
+MAX_HISTORY_QUERY_CHARS = 200
+DEFAULT_HISTORY_LIMIT = 50
+MAX_HISTORY_LIMIT = 100
 MAX_CHAT_EVENT_LINE_BYTES = 256 * 1024
 MAX_CHAT_OUTPUT_BYTES = 2 * 1024 * 1024
 MAX_CHAT_STDERR_BYTES = 16 * 1024
@@ -52,6 +57,7 @@ DEFAULT_CHAT_TERMINATE_GRACE_SECONDS = 1.0
 DEFAULT_MODEL_CATALOG_TIMEOUT_SECONDS = 5.0
 MAX_MODEL_CATALOG_BYTES = 2 * 1024 * 1024
 CHAT_MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+CHAT_SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 
@@ -86,6 +92,31 @@ def valid_chat_model(value: Any) -> bool:
         and 1 <= len(value) <= MAX_CHAT_MODEL_CHARS
         and CHAT_MODEL_PATTERN.fullmatch(value) is not None
     )
+
+
+def valid_chat_session_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and 1 <= len(value) <= MAX_CHAT_SESSION_ID_CHARS
+        and CHAT_SESSION_ID_PATTERN.fullmatch(value) is not None
+    )
+
+
+def resolve_new_chat_cwd(value: Any) -> Path | None:
+    """Resolve a local working directory without accepting options or NULs."""
+
+    if (
+        not isinstance(value, str)
+        or not 1 <= len(value) <= MAX_CHAT_CWD_CHARS
+        or not value.strip()
+        or "\x00" in value
+    ):
+        return None
+    try:
+        path = Path(value).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    return path if path.is_dir() else None
 
 
 def executable_command(
@@ -672,6 +703,185 @@ class SessionService:
             self._snapshot_condition.notify_all()
         return self._freshen_snapshot(payload, wall_now)
 
+    @staticmethod
+    def _history_epoch(row: Mapping[str, Any]) -> float | None:
+        values = [
+            _epoch_seconds(row.get("recency_at_ms"), milliseconds=True),
+            _epoch_seconds(row.get("recency_at")),
+            SessionService._row_epoch(row, "updated"),
+            SessionService._row_epoch(row, "created"),
+        ]
+        valid = [value for value in values if value is not None]
+        return max(valid) if valid else None
+
+    @staticmethod
+    def _history_matches(row: Mapping[str, Any], query: str) -> bool:
+        if not query:
+            return True
+        needle = query.casefold()
+        fields = (
+            "id",
+            "title",
+            "first_user_message",
+            "cwd",
+            "model",
+            "model_provider",
+            "agent_nickname",
+            "agent_role",
+        )
+        return any(
+            needle in str(row.get(name) or "")[:10_000].casefold()
+            for name in fields
+        )
+
+    def history_payload(
+        self,
+        query: str = "",
+        limit: int = DEFAULT_HISTORY_LIMIT,
+    ) -> dict[str, Any]:
+        """Return safe, unarchived thread metadata without reading rollout content."""
+
+        now = self._now()
+        payload: dict[str, Any] = {
+            "sessions": [],
+            "generated_at": _utc_iso(now),
+            "database_available": False,
+            "warning": None,
+            "query": query,
+            "limit": limit,
+        }
+        try:
+            connection = self._connect_read_only()
+            try:
+                connection.execute("BEGIN")
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(threads)")
+                }
+                if "id" not in columns:
+                    raise sqlite3.DatabaseError("threads table is missing")
+                wanted = (
+                    "id",
+                    "created_at",
+                    "updated_at",
+                    "created_at_ms",
+                    "updated_at_ms",
+                    "recency_at",
+                    "recency_at_ms",
+                    "source",
+                    "thread_source",
+                    "model_provider",
+                    "model",
+                    "cwd",
+                    "title",
+                    "first_user_message",
+                    "agent_nickname",
+                    "agent_role",
+                )
+                selected = [name for name in wanted if name in columns]
+                quoted = ", ".join(f'"{name}"' for name in selected)
+                where = (
+                    ' WHERE COALESCE("archived", 0) = 0'
+                    if "archived" in columns
+                    else ""
+                )
+                order_column = next(
+                    (
+                        name
+                        for name in (
+                            "recency_at_ms",
+                            "updated_at_ms",
+                            "recency_at",
+                            "updated_at",
+                            "created_at_ms",
+                            "created_at",
+                        )
+                        if name in columns
+                    ),
+                    "id",
+                )
+                cursor = connection.execute(
+                    f'SELECT {quoted} FROM threads{where} '
+                    f'ORDER BY "{order_column}" DESC, "id" DESC'
+                )
+                rows: list[dict[str, Any]] = []
+                while len(rows) < limit:
+                    batch = cursor.fetchmany(256)
+                    if not batch:
+                        break
+                    for raw_row in batch:
+                        row = dict(raw_row)
+                        if self._history_matches(row, query):
+                            rows.append(row)
+                            if len(rows) >= limit:
+                                break
+
+                parents: dict[str, str] = {}
+                edge_columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        "PRAGMA table_info(thread_spawn_edges)"
+                    )
+                }
+                session_ids = [
+                    str(row.get("id") or "")
+                    for row in rows
+                    if valid_chat_session_id(row.get("id"))
+                ]
+                if session_ids and {
+                    "parent_thread_id",
+                    "child_thread_id",
+                } <= edge_columns:
+                    placeholders = ",".join("?" for _ in session_ids)
+                    for edge in connection.execute(
+                        "SELECT parent_thread_id, child_thread_id "
+                        f"FROM thread_spawn_edges WHERE child_thread_id IN ({placeholders})",
+                        session_ids,
+                    ):
+                        parents[str(edge[1])] = str(edge[0])
+            finally:
+                connection.close()
+        except (FileNotFoundError, OSError, sqlite3.Error) as error:
+            payload["warning"] = self._warning_for(error)
+            return payload
+
+        sessions: list[dict[str, Any]] = []
+        for row in rows:
+            session_id = str(row.get("id") or "")
+            if not valid_chat_session_id(session_id):
+                continue
+            updated = self._history_epoch(row)
+            age_seconds = max(0, int(now - updated)) if updated is not None else 0
+            source, source_parent, is_subagent = self._source_details(row)
+            parent_id = parents.get(session_id) or source_parent
+            is_subagent = is_subagent or bool(parent_id)
+            title = str(
+                row.get("title")
+                or row.get("first_user_message")
+                or "Untitled session"
+            ).strip()[:400]
+            model_value = row.get("model") or row.get("model_provider") or "unknown"
+            model = str(model_value)[:MAX_CHAT_MODEL_CHARS]
+            sessions.append(
+                {
+                    "id": session_id,
+                    "short_id": session_id.replace("-", "")[-8:],
+                    "title": title or "Untitled session",
+                    "cwd": str(row.get("cwd") or "")[:MAX_CHAT_CWD_CHARS],
+                    "model": model,
+                    "source": "subagent" if is_subagent else source,
+                    "updated_at": _utc_iso(updated) if updated is not None else "",
+                    "age_seconds": age_seconds,
+                    "is_active": updated is not None and age_seconds <= self.active_seconds,
+                    "is_subagent": is_subagent,
+                    "parent_id": parent_id,
+                    "agent_nickname": str(row.get("agent_nickname") or "")[:160],
+                    "agent_role": str(row.get("agent_role") or "")[:160],
+                }
+            )
+        payload.update(sessions=sessions, database_available=True)
+        return payload
+
     def known_chat_models(self) -> list[str]:
         """Return safe model identifiers observed in unarchived local threads."""
 
@@ -807,20 +1017,31 @@ class ChatUnavailableError(RuntimeError):
 
 
 def map_codex_chat_event(
-    event: Mapping[str, Any], expected_session_id: str
+    event: Mapping[str, Any], expected_session_id: str | None
 ) -> dict[str, Any] | None:
     """Map Codex JSONL to a small allowlisted public event contract."""
 
     event_type = str(event.get("type") or "")
     if event_type == "thread.started":
-        thread_id = event.get("thread_id")
-        if thread_id is not None and str(thread_id) != expected_session_id:
+        thread_id = str(event.get("thread_id") or "")
+        if not valid_chat_session_id(thread_id):
+            return {
+                "type": "error",
+                "code": "invalid_session",
+                "message": "Codex reported an invalid session",
+            }
+        if expected_session_id is not None and thread_id != expected_session_id:
             return {
                 "type": "error",
                 "code": "session_mismatch",
                 "message": "Codex resumed a different session",
             }
-        return {"type": "status", "status": "connected", "message": "已连接会话"}
+        return {
+            "type": "status",
+            "status": "connected",
+            "message": "已连接会话",
+            "session_id": thread_id,
+        }
     if event_type == "turn.started":
         return {"type": "status", "status": "working", "message": "正在处理"}
     if event_type == "turn.completed":
@@ -864,8 +1085,15 @@ def map_codex_chat_event(
 
 
 class _ChatJob:
-    def __init__(self, session_id: str, deadline: float) -> None:
+    def __init__(
+        self,
+        reservation_key: str,
+        session_id: str | None,
+        deadline: float,
+    ) -> None:
+        self.reservation_key = reservation_key
         self.session_id = session_id
+        self.is_new = session_id is None
         self.deadline = deadline
         self.process: subprocess.Popen[bytes] | Any | None = None
         self.events: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=128)
@@ -1080,24 +1308,43 @@ class CodexChatService:
             "warning": warning,
         }
 
-    def _reserve(self, session_id: str) -> _ChatJob:
+    def _reserve(self, session_id: str | None) -> _ChatJob:
         with self._condition:
             if self._closed:
                 raise ChatUnavailableError("chat service is closed")
-            if session_id in self._active:
+            if session_id is not None and any(
+                active.session_id == session_id for active in self._active.values()
+            ):
                 raise ChatBusyError("session")
             if len(self._active) >= self.max_concurrent:
                 raise ChatBusyError("global")
-            job = _ChatJob(session_id, self.monotonic() + self.timeout_seconds)
-            self._active[session_id] = job
+            reservation_key = session_id or f"new:{uuid.uuid4().hex}"
+            job = _ChatJob(
+                reservation_key,
+                session_id,
+                self.monotonic() + self.timeout_seconds,
+            )
+            self._active[reservation_key] = job
             return job
 
     def _finish(self, job: _ChatJob) -> None:
         with self._condition:
-            if self._active.get(job.session_id) is job:
-                del self._active[job.session_id]
+            if self._active.get(job.reservation_key) is job:
+                del self._active[job.reservation_key]
             job.finished.set()
             self._condition.notify_all()
+
+    def _adopt_session_id(self, job: _ChatJob, session_id: str) -> bool:
+        with self._condition:
+            if job.session_id is not None:
+                return job.session_id == session_id
+            if any(
+                active is not job and active.session_id == session_id
+                for active in self._active.values()
+            ):
+                return False
+            job.session_id = session_id
+            return True
 
     @staticmethod
     def _pipe_bytes(value: bytes | str) -> bytes:
@@ -1279,23 +1526,13 @@ class CodexChatService:
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
 
-    def start(
+    def _start_process(
         self,
-        session_id: str,
+        job: _ChatJob,
+        arguments: list[str],
         message: str,
         cwd: Path,
-        model: str | None = None,
     ) -> _ChatJob:
-        job = self._reserve(session_id)
-        arguments = [
-            "exec",
-            "resume",
-            "--json",
-            "--skip-git-repo-check",
-        ]
-        if model is not None:
-            arguments.extend(["--model", model])
-        arguments.extend([session_id, "-"])
         command = self._codex_command(*arguments)
         environment = os.environ.copy()
         environment["CODEX_HOME"] = str(self.session_service.codex_home)
@@ -1343,6 +1580,38 @@ class CodexChatService:
         )
         job.watchdog.start()
         return job
+
+    def start(
+        self,
+        session_id: str,
+        message: str,
+        cwd: Path,
+        model: str | None = None,
+    ) -> _ChatJob:
+        job = self._reserve(session_id)
+        arguments = [
+            "exec",
+            "resume",
+            "--json",
+            "--skip-git-repo-check",
+        ]
+        if model is not None:
+            arguments.extend(["--model", model])
+        arguments.extend([session_id, "-"])
+        return self._start_process(job, arguments, message, cwd)
+
+    def start_new(
+        self,
+        message: str,
+        cwd: Path,
+        model: str | None = None,
+    ) -> _ChatJob:
+        job = self._reserve(None)
+        arguments = ["exec", "--json", "--skip-git-repo-check"]
+        if model is not None:
+            arguments.extend(["--model", model])
+        arguments.append("-")
+        return self._start_process(job, arguments, message, cwd)
 
     def events_for(self, job: _ChatJob) -> Iterable[dict[str, Any]]:
         process = job.process
@@ -1423,6 +1692,15 @@ class CodexChatService:
                 mapped = map_codex_chat_event(parsed, job.session_id)
                 if mapped is None:
                     continue
+                mapped_session_id = mapped.get("session_id")
+                if isinstance(mapped_session_id, str) and not self._adopt_session_id(
+                    job, mapped_session_id
+                ):
+                    mapped = {
+                        "type": "error",
+                        "code": "session_busy",
+                        "message": "Codex session already has a request in progress",
+                    }
                 mapped_size = len(
                     json.dumps(mapped, ensure_ascii=False, allow_nan=False).encode("utf-8")
                 )
@@ -1440,13 +1718,30 @@ class CodexChatService:
                 if mapped.get("type") == "error":
                     failed = True
                     reported_error = True
-                    if mapped.get("code") == "session_mismatch":
+                    if mapped.get("code") in {
+                        "invalid_session",
+                        "session_busy",
+                        "session_mismatch",
+                    }:
                         self._terminate_process(process)
                 yield mapped
-                if mapped.get("code") == "session_mismatch":
+                if mapped.get("code") in {
+                    "invalid_session",
+                    "session_busy",
+                    "session_mismatch",
+                }:
                     break
 
             returncode = process.poll()
+            if job.is_new and job.session_id is None and not job.cancelled.is_set():
+                failed = True
+                if not reported_error:
+                    reported_error = True
+                    yield {
+                        "type": "error",
+                        "code": "codex_failed",
+                        "message": "Codex did not report the new session",
+                    }
             if not job.cancelled.is_set() and returncode not in (None, 0):
                 failed = True
                 if not reported_error:
@@ -1636,28 +1931,24 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
             return None
         return value
 
-    def _handle_chat(self) -> None:
-        if not self._client_is_loopback():
-            self._send_json(HTTPStatus.FORBIDDEN, {"error": "chat is only available from this computer"})
-            return
-        value = self._read_chat_json()
-        if value is None:
-            return
-        session_id = value.get("session_id")
+    def _validated_chat_message_model(
+        self, value: Mapping[str, Any]
+    ) -> tuple[str, str | None] | None:
         message = value.get("message")
         model = value.get("model")
-        if not isinstance(session_id, str) or not isinstance(message, str):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "session_id and message must be strings"})
-            return
+        if not isinstance(message, str):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "message must be a string"})
+            return None
         if (
-            not 1 <= len(session_id) <= MAX_CHAT_SESSION_ID_CHARS
-            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]*", session_id) is None
+            not 1 <= len(message) <= MAX_CHAT_MESSAGE_CHARS
+            or not message.strip()
+            or "\x00" in message
         ):
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid session_id"})
-            return
-        if not 1 <= len(message) <= MAX_CHAT_MESSAGE_CHARS or not message.strip() or "\x00" in message:
-            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "message must contain 1 to 12000 characters"})
-            return
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "message must contain 1 to 12000 characters"},
+            )
+            return None
         if model is not None and not valid_chat_model(model):
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
@@ -1666,13 +1957,63 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
                     "code": "invalid_model",
                 },
             )
-            return
+            return None
         if model is not None and not self.chat_service.model_is_allowed(model):
             self._send_json(
                 HTTPStatus.BAD_REQUEST,
-                {"error": "model is not allowed by this server", "code": "model_not_allowed"},
+                {
+                    "error": "model is not allowed by this server",
+                    "code": "model_not_allowed",
+                },
             )
+            return None
+        return message, model
+
+    def _stream_chat_job(self, job: _ChatJob) -> None:
+        try:
+            self._send_ndjson_headers(job.deadline)
+            self._write_ndjson(
+                {"type": "status", "status": "started", "message": "已开始处理"},
+                job.deadline,
+            )
+            for event in self.chat_service.events_for(job):
+                self._write_ndjson(event, job.deadline)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        except Exception:
+            try:
+                self._write_ndjson(
+                    {
+                        "type": "error",
+                        "code": "internal_error",
+                        "message": "Codex chat stopped unexpectedly",
+                    },
+                    job.deadline,
+                )
+                self._write_ndjson({"type": "done", "ok": False}, job.deadline)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+        finally:
+            self.chat_service.cancel(job)
+
+    def _handle_chat(self) -> None:
+        if not self._client_is_loopback():
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "chat is only available from this computer"})
             return
+        value = self._read_chat_json()
+        if value is None:
+            return
+        session_id = value.get("session_id")
+        if not isinstance(session_id, str):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "session_id must be a string"})
+            return
+        if not valid_chat_session_id(session_id):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid session_id"})
+            return
+        validated = self._validated_chat_message_model(value)
+        if validated is None:
+            return
+        message, model = validated
         try:
             cwd = self.service.resolve_chat_target(session_id)
         except (FileNotFoundError, OSError, sqlite3.Error):
@@ -1694,33 +2035,102 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Codex chat is unavailable"})
             return
 
-        try:
-            self._send_ndjson_headers(job.deadline)
-            self._write_ndjson(
-                {"type": "status", "status": "started", "message": "已开始处理"},
-                job.deadline,
+        self._stream_chat_job(job)
+
+    def _handle_new_chat(self) -> None:
+        if not self._client_is_loopback():
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "chat is only available from this computer"},
             )
-            for event in self.chat_service.events_for(job):
-                self._write_ndjson(event, job.deadline)
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
-        except Exception:
-            try:
-                self._write_ndjson(
-                    {
-                        "type": "error",
-                        "code": "internal_error",
-                        "message": "Codex chat stopped unexpectedly",
-                    },
-                    job.deadline,
-                )
-                self._write_ndjson(
-                    {"type": "done", "ok": False}, job.deadline
-                )
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
-        finally:
-            self.chat_service.cancel(job)
+            return
+        value = self._read_chat_json()
+        if value is None:
+            return
+        validated = self._validated_chat_message_model(value)
+        if validated is None:
+            return
+        message, model = validated
+        cwd = resolve_new_chat_cwd(value.get("cwd"))
+        if cwd is None:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "cwd must be an existing local directory",
+                    "code": "invalid_cwd",
+                },
+            )
+            return
+        try:
+            job = self.chat_service.start_new(message, cwd, model)
+        except ChatBusyError:
+            self._send_json(
+                HTTPStatus.CONFLICT,
+                {
+                    "error": "too many chat requests are in progress",
+                    "code": "global_busy",
+                },
+            )
+            return
+        except ChatUnavailableError:
+            self._send_json(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "Codex chat is unavailable"},
+            )
+            return
+        self._stream_chat_job(job)
+
+    def _handle_history(self, *, head: bool = False) -> None:
+        if not self._client_is_loopback():
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "session history is only available from this computer"},
+                head=head,
+            )
+            return
+        parameters = parse_qs(
+            urlsplit(self.path).query,
+            keep_blank_values=True,
+            strict_parsing=False,
+        )
+        query_values = parameters.get("q", [""])
+        limit_values = parameters.get("limit", [str(DEFAULT_HISTORY_LIMIT)])
+        if len(query_values) != 1 or len(limit_values) != 1:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "q and limit may only be provided once"},
+                head=head,
+            )
+            return
+        query = query_values[0].strip()
+        if len(query) > MAX_HISTORY_QUERY_CHARS or "\x00" in query:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "q must contain at most 200 safe characters"},
+                head=head,
+            )
+            return
+        raw_limit = limit_values[0]
+        if re.fullmatch(r"[0-9]{1,3}", raw_limit) is None:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "limit must be an integer from 1 to 100"},
+                head=head,
+            )
+            return
+        limit = int(raw_limit)
+        if not 1 <= limit <= MAX_HISTORY_LIMIT:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": "limit must be an integer from 1 to 100"},
+                head=head,
+            )
+            return
+        self._send_json(
+            HTTPStatus.OK,
+            self.service.history_payload(query, limit),
+            head=head,
+        )
 
     def _static_candidate(self, request_path: str) -> Path | None:
         try:
@@ -1778,6 +2188,8 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
                 )
             elif path.rstrip("/") == "/api/sessions":
                 self._send_json(HTTPStatus.OK, self.service.sessions_payload(), head=head)
+            elif path.rstrip("/") == "/api/sessions/history":
+                self._handle_history(head=head)
             elif path.rstrip("/") == "/api/health":
                 self._send_json(HTTPStatus.OK, self.service.health_payload(), head=head)
             elif path.rstrip("/") == "/api/chat/models":
@@ -1819,6 +2231,8 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.FORBIDDEN, {"error": "invalid Host header"})
             elif path.rstrip("/") == "/api/chat":
                 self._handle_chat()
+            elif path.rstrip("/") == "/api/chat/new":
+                self._handle_new_chat()
             elif path.startswith("/api/"):
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown API endpoint"})
             else:

@@ -1,6 +1,7 @@
 import json
 from contextlib import redirect_stderr
 import http.client
+from http import HTTPStatus
 import io
 import os
 from pathlib import Path
@@ -342,7 +343,8 @@ if delay:
 wait_file = os.environ.get("FAKE_CODEX_WAIT_FILE")
 while wait_file and not os.path.exists(wait_file):
     time.sleep(0.01)
-session_id = sys.argv[-2]
+arguments = sys.argv[1:]
+session_id = arguments[-2] if "resume" in arguments else os.environ.get("FAKE_CODEX_NEW_SESSION", "new-session-5555")
 print(json.dumps({"type": "thread.started", "thread_id": session_id}), flush=True)
 print(json.dumps({"type": "turn.started"}), flush=True)
 print(json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "reasoning-secret"}}), flush=True)
@@ -382,14 +384,20 @@ print("stderr-secret", file=sys.stderr, flush=True)
         return httpd, thread
 
     @staticmethod
-    def _post_chat(httpd, payload, *, content_type="application/json"):
+    def _post_chat(
+        httpd,
+        payload,
+        *,
+        content_type="application/json",
+        path="/api/chat",
+    ):
         body = json.dumps(payload).encode("utf-8")
         connection = http.client.HTTPConnection(
             "127.0.0.1", httpd.server_port, timeout=5
         )
         connection.request(
             "POST",
-            "/api/chat",
+            path,
             body=body,
             headers={"Content-Type": content_type},
         )
@@ -449,6 +457,29 @@ print("stderr-secret", file=sys.stderr, flush=True)
         self.assertEqual("Using exec", child["activity"])
         self.assertNotIn("should remain private", child["activity"])
         self.assertIsInstance(child["color_seed"], int)
+
+    def test_history_payload_searches_unarchived_sessions_without_rollouts(self):
+        service = self.service()
+        with mock.patch.object(
+            service,
+            "_rollout_activity",
+            side_effect=AssertionError("history must not inspect rollout content"),
+        ):
+            payload = service.history_payload(limit=10)
+        self.assertTrue(payload["database_available"])
+        self.assertEqual(
+            ["child-2222", "parent-1111", "old-3333"],
+            [item["id"] for item in payload["sessions"]],
+        )
+        self.assertNotIn("archived-4444", {item["id"] for item in payload["sessions"]})
+        old = payload["sessions"][-1]
+        self.assertFalse(old["is_active"])
+        self.assertEqual("Old task", old["title"])
+
+        searched = service.history_payload("old task", 10)
+        self.assertEqual(["old-3333"], [item["id"] for item in searched["sessions"]])
+        limited = service.history_payload("", 1)
+        self.assertEqual(1, len(limited["sessions"]))
 
     def test_database_prefilters_active_rows_and_only_loads_their_edges(self):
         connection = sqlite3.connect(self.database)
@@ -599,6 +630,17 @@ print("stderr-secret", file=sys.stderr, flush=True)
         self.assertEqual("assistant", assistant["type"])
         self.assertEqual("safe reply\nnext line", assistant["message"])
 
+        started = server.map_codex_chat_event(
+            {"type": "thread.started", "thread_id": "new-session-5555"},
+            None,
+        )
+        self.assertEqual("new-session-5555", started["session_id"])
+        invalid = server.map_codex_chat_event(
+            {"type": "thread.started", "thread_id": "--unsafe"},
+            None,
+        )
+        self.assertEqual("invalid_session", invalid["code"])
+
     def test_resolve_chat_target_checks_database_and_falls_back(self):
         service = self.service()
         self.assertEqual(self.home.resolve(), service.resolve_chat_target("parent-1111"))
@@ -646,6 +688,64 @@ print("stderr-secret", file=sys.stderr, flush=True)
             self.assertNotIn("reasoning-secret", response_text)
             self.assertNotIn("tool-secret", response_text)
             self.assertNotIn("stderr-secret", response_text)
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
+    def test_new_chat_http_creates_session_in_requested_directory(self):
+        fake_codex = self._fake_codex()
+        chat = server.CodexChatService(
+            self.service(),
+            codex_bin=fake_codex,
+            timeout_seconds=3,
+            heartbeat_seconds=0.05,
+        )
+        httpd, thread = self._chat_server(chat)
+        try:
+            status, content_type, body = self._post_chat(
+                httpd,
+                {
+                    "cwd": str(self.home),
+                    "message": "start overtime",
+                    "model": "gpt-test",
+                },
+                path="/api/chat/new",
+            )
+            self.assertEqual(200, status)
+            self.assertIn("application/x-ndjson", content_type)
+            events = [json.loads(line) for line in body.splitlines()]
+            connected = next(
+                item
+                for item in events
+                if item.get("status") == "connected"
+            )
+            self.assertEqual("new-session-5555", connected["session_id"])
+            report = json.loads(
+                next(item for item in events if item["type"] == "assistant")["message"]
+            )
+            self.assertEqual(
+                [
+                    "exec",
+                    "--json",
+                    "--skip-git-repo-check",
+                    "--model",
+                    "gpt-test",
+                    "-",
+                ],
+                report["argv"],
+            )
+            self.assertEqual("start overtime", report["prompt"])
+            self.assertEqual(str(self.home.resolve()), report["cwd"])
+            self.assertTrue(events[-1]["ok"])
+
+            status, _, response_body = self._post_chat(
+                httpd,
+                {"cwd": str(self.home / "missing"), "message": "hello"},
+                path="/api/chat/new",
+            )
+            self.assertEqual(400, status)
+            self.assertEqual("invalid_cwd", json.loads(response_body)["code"])
         finally:
             httpd.shutdown()
             httpd.server_close()
@@ -1080,6 +1180,17 @@ print("stderr-secret", file=sys.stderr, flush=True)
                 api_payload = json.load(response)
             self.assertEqual(2, len(api_payload["sessions"]))
 
+            with urlopen(
+                base + "/api/sessions/history?q=Old&limit=10",
+                timeout=2,
+            ) as response:
+                history = json.load(response)
+            self.assertEqual(["old-3333"], [item["id"] for item in history["sessions"]])
+            with self.assertRaises(HTTPError) as context:
+                urlopen(base + "/api/sessions/history?limit=0", timeout=2)
+            self.assertEqual(400, context.exception.code)
+            context.exception.close()
+
             with urlopen(base + "/", timeout=2) as response:
                 self.assertEqual(b"pixel office", response.read())
 
@@ -1091,6 +1202,18 @@ print("stderr-secret", file=sys.stderr, flush=True)
             httpd.shutdown()
             httpd.server_close()
             thread.join(timeout=2)
+
+    def test_sensitive_history_and_new_chat_require_loopback_client(self):
+        handler = object.__new__(server.PixelOfficeHandler)
+        handler.client_address = ("192.168.1.50", 12345)
+        handler.path = "/api/sessions/history"
+        handler._send_json = mock.Mock()
+        handler._handle_history()
+        self.assertEqual(HTTPStatus.FORBIDDEN, handler._send_json.call_args.args[0])
+
+        handler._send_json.reset_mock()
+        handler._handle_new_chat()
+        self.assertEqual(HTTPStatus.FORBIDDEN, handler._send_json.call_args.args[0])
 
     def test_non_loopback_binding_allows_lan_host_headers(self):
         static = Path(self.tempdir.name) / "lan-static"
@@ -1152,6 +1275,23 @@ print("stderr-secret", file=sys.stderr, flush=True)
             httpd.shutdown()
             httpd.server_close()
             thread.join(timeout=2)
+
+    def test_overtime_frontend_contract_is_bundled(self):
+        index = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        styles = (PROJECT_ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+
+        for element_id in (
+            'id="overtimeButton"',
+            'id="overtimeModal"',
+            'id="overtimeNewPanel"',
+            'id="overtimeHistoryPanel"',
+            'id="overtimeHistoryList"',
+        ):
+            self.assertIn(element_id, index)
+        self.assertIn('const HISTORY_API_URL = "/api/sessions/history"', script)
+        self.assertIn('const NEW_CHAT_API_URL = "/api/chat/new"', script)
+        self.assertIn(".overtime-mode-panel[hidden]", styles)
 
 
 if __name__ == "__main__":
