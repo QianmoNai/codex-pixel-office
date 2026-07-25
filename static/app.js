@@ -146,6 +146,8 @@
     agentNodes: new Map(),
     deskNodes: new Map(),
     pollTimer: 0,
+    pollInFlight: false,
+    pollRefreshRequested: false,
     behaviorTimer: 0,
     reactionTimer: 0,
     behaviors: new Map(),
@@ -1786,7 +1788,41 @@
     if (elements.connectionText.textContent !== message) elements.connectionText.textContent = message;
   }
 
+  function clearSessionPollTimer() {
+    window.clearTimeout(state.pollTimer);
+    state.pollTimer = 0;
+  }
+
+  function scheduleSessionPoll(delay = POLL_MS) {
+    clearSessionPollTimer();
+    if (document.hidden) return;
+    state.pollTimer = window.setTimeout(() => {
+      state.pollTimer = 0;
+      fetchSessions();
+    }, delay);
+  }
+
+  function initializeSessionPolling() {
+    document.addEventListener("visibilitychange", () => {
+      clearSessionPollTimer();
+      if (document.hidden) {
+        state.pollRefreshRequested = false;
+        return;
+      }
+      if (state.pollInFlight) {
+        state.pollRefreshRequested = true;
+        return;
+      }
+      fetchSessions();
+    });
+  }
+
   async function fetchSessions() {
+    if (state.pollInFlight) return;
+    clearSessionPollTimer();
+    if (document.hidden) return;
+    state.pollRefreshRequested = false;
+    state.pollInFlight = true;
     if (!state.hasLoaded) setConnection("loading", "正在连接办公室…");
     const controller = new AbortController();
     const timeout = window.setTimeout(() => controller.abort(), 8000);
@@ -1821,8 +1857,13 @@
       elements.updatedTime.textContent = state.sessions.length ? "连接中断 · 显示上次状态" : "连接中断 · 等待重试";
     } finally {
       window.clearTimeout(timeout);
-      window.clearTimeout(state.pollTimer);
-      state.pollTimer = window.setTimeout(fetchSessions, POLL_MS);
+      state.pollInFlight = false;
+      if (state.pollRefreshRequested && !document.hidden) {
+        state.pollRefreshRequested = false;
+        fetchSessions();
+      } else {
+        scheduleSessionPoll();
+      }
     }
   }
 
@@ -2105,6 +2146,7 @@
   initializeAssets();
   initializeRoamingPreference();
   initializeBossNpc();
+  initializeSessionPolling();
   bindControls();
   fetchModels();
   requestAnimationFrame(fitView);

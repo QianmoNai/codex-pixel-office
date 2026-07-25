@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
 import hashlib
 import ipaddress
 import json
@@ -34,6 +35,8 @@ DEFAULT_PORT = 8765
 DEFAULT_ACTIVE_MINUTES = 30.0
 DEFAULT_IDLE_SECONDS = 300.0
 ROLLOUT_TAIL_BYTES = 1024 * 1024
+ROLLOUT_CACHE_MAX_ENTRIES = 128
+DEFAULT_SESSION_SNAPSHOT_CACHE_SECONDS = 0.75
 STATUSES = ("working", "thinking", "tool", "waiting", "idle")
 MAX_CHAT_BODY_BYTES = 64 * 1024
 MAX_CHAT_MESSAGE_CHARS = 12_000
@@ -288,6 +291,8 @@ class SessionService:
         *,
         now: Callable[[], float] = time.time,
         idle_after_seconds: float = DEFAULT_IDLE_SECONDS,
+        monotonic: Callable[[], float] = time.monotonic,
+        snapshot_cache_seconds: float = DEFAULT_SESSION_SNAPSHOT_CACHE_SECONDS,
     ) -> None:
         self.codex_home = Path(codex_home).expanduser().resolve()
         self.database_path = self.codex_home / "state_5.sqlite"
@@ -297,6 +302,16 @@ class SessionService:
         self.active_seconds = self.active_minutes * 60.0
         self.idle_after_seconds = min(float(idle_after_seconds), self.active_seconds)
         self._now = now
+        self._monotonic = monotonic
+        self.snapshot_cache_seconds = max(0.0, float(snapshot_cache_seconds))
+        self._rollout_cache_lock = threading.Lock()
+        self._rollout_cache: OrderedDict[
+            Path, tuple[tuple[int, int, int, int], tuple[str, str]]
+        ] = OrderedDict()
+        self._snapshot_condition = threading.Condition()
+        self._snapshot_building = False
+        self._snapshot_payload: dict[str, Any] | None = None
+        self._snapshot_expires_at = 0.0
 
     def _connect_read_only(self) -> sqlite3.Connection:
         if not self.database_path.is_file():
@@ -317,7 +332,37 @@ class SessionService:
             return "Codex state database is temporarily busy"
         return "Codex state database is unavailable"
 
-    def _read_database(self) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    @staticmethod
+    def _active_sql_filter(
+        columns: set[str], cutoff: float
+    ) -> tuple[str, list[float]]:
+        """Build a conservative timestamp pre-filter for mixed Codex schemas.
+
+        SQLite tables created by older Codex versions can store ISO timestamps or
+        numeric-looking strings. Those rows stay in the candidate set and receive
+        the exact Python conversion below; genuinely numeric rows are filtered in
+        SQLite so the common schema does not require a full table scan in Python.
+        """
+
+        predicates: list[str] = []
+        parameters: list[float] = []
+        for name, threshold in (
+            ("updated_at_ms", cutoff * 1000.0),
+            ("updated_at", cutoff),
+            ("created_at_ms", cutoff * 1000.0),
+            ("created_at", cutoff),
+        ):
+            if name not in columns:
+                continue
+            predicates.append(
+                f'("{name}" IS NOT NULL AND "{name}" >= ?)'
+            )
+            parameters.append(threshold)
+        if not predicates:
+            return "", []
+        return "(" + " OR ".join(predicates) + ")", parameters
+
+    def _read_database(self, cutoff: float) -> tuple[list[dict[str, Any]], dict[str, str]]:
         connection = self._connect_read_only()
         try:
             connection.execute("BEGIN")
@@ -349,19 +394,51 @@ class SessionService:
             )
             selected = [name for name in wanted if name in columns]
             quoted = ", ".join(f'"{name}"' for name in selected)
-            where = ' WHERE COALESCE("archived", 0) = 0' if "archived" in columns else ""
-            rows = [dict(row) for row in connection.execute(f"SELECT {quoted} FROM threads{where}")]
+            filters: list[str] = []
+            parameters: list[float] = []
+            if "archived" in columns:
+                filters.append('COALESCE("archived", 0) = 0')
+            timestamp_filter, timestamp_parameters = self._active_sql_filter(
+                columns, cutoff
+            )
+            if timestamp_filter:
+                filters.append(timestamp_filter)
+                parameters.extend(timestamp_parameters)
+            where = f" WHERE {' AND '.join(filters)}" if filters else ""
+            candidates = [
+                dict(row)
+                for row in connection.execute(
+                    f"SELECT {quoted} FROM threads{where}", parameters
+                )
+            ]
+            # This fallback is intentionally retained after the SQL pre-filter:
+            # it handles ISO timestamps and numeric text exactly like old builds.
+            rows = []
+            for row in candidates:
+                updated = self._row_epoch(row, "updated") or self._row_epoch(
+                    row, "created"
+                )
+                if updated is not None and updated >= cutoff:
+                    rows.append(row)
 
             parents: dict[str, str] = {}
             edge_columns = {
                 str(row[1])
                 for row in connection.execute("PRAGMA table_info(thread_spawn_edges)")
             }
-            if {"parent_thread_id", "child_thread_id"} <= edge_columns:
-                for row in connection.execute(
-                    "SELECT parent_thread_id, child_thread_id FROM thread_spawn_edges"
-                ):
-                    parents[str(row[1])] = str(row[0])
+            active_ids = [str(row.get("id") or "") for row in rows]
+            active_ids = [session_id for session_id in active_ids if session_id]
+            if active_ids and {"parent_thread_id", "child_thread_id"} <= edge_columns:
+                # Stay comfortably below SQLite's variable limit on older builds.
+                for offset in range(0, len(active_ids), 500):
+                    batch = active_ids[offset : offset + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    for row in connection.execute(
+                        "SELECT parent_thread_id, child_thread_id "
+                        f"FROM thread_spawn_edges WHERE child_thread_id IN ({placeholders})",
+                        batch,
+                    ):
+                        parents[str(row[1])] = str(row[0])
             return rows, parents
         finally:
             connection.close()
@@ -387,6 +464,41 @@ class SessionService:
         except ValueError:
             return None
         return path
+
+    def _rollout_activity(self, path: Path, age_seconds: int) -> tuple[str, str]:
+        """Classify one rollout, caching only its small age-independent result."""
+
+        try:
+            stat_result = path.stat()
+        except OSError:
+            with self._rollout_cache_lock:
+                self._rollout_cache.pop(path, None)
+            return classify_activity((), age_seconds, self.idle_after_seconds)
+        signature = (
+            int(stat_result.st_dev),
+            int(stat_result.st_ino),
+            int(stat_result.st_size),
+            int(stat_result.st_mtime_ns),
+        )
+        with self._rollout_cache_lock:
+            cached = self._rollout_cache.get(path)
+            if cached is not None and cached[0] == signature:
+                self._rollout_cache.move_to_end(path)
+                base_status, base_activity = cached[1]
+                if age_seconds >= self.idle_after_seconds:
+                    return "idle", "Idle"
+                return base_status, base_activity
+
+            base_activity = classify_activity(
+                read_rollout_tail(path), 0, self.idle_after_seconds
+            )
+            self._rollout_cache[path] = (signature, base_activity)
+            self._rollout_cache.move_to_end(path)
+            while len(self._rollout_cache) > ROLLOUT_CACHE_MAX_ENTRIES:
+                self._rollout_cache.popitem(last=False)
+            if age_seconds >= self.idle_after_seconds:
+                return "idle", "Idle"
+            return base_activity
 
     @staticmethod
     def _source_details(row: Mapping[str, Any]) -> tuple[str, str | None, bool]:
@@ -416,8 +528,7 @@ class SessionService:
             source = "unknown"
         return source, parent_id, is_subagent
 
-    def sessions_payload(self) -> dict[str, Any]:
-        now = self._now()
+    def _build_sessions_payload(self, now: float) -> dict[str, Any]:
         active_minutes: int | float = (
             int(self.active_minutes) if self.active_minutes.is_integer() else self.active_minutes
         )
@@ -429,14 +540,14 @@ class SessionService:
             "database_available": False,
             "warning": None,
         }
+        cutoff = now - self.active_seconds
         try:
-            rows, parents = self._read_database()
+            rows, parents = self._read_database(cutoff)
         except (FileNotFoundError, OSError, sqlite3.Error) as error:
             payload["warning"] = self._warning_for(error)
             return payload
 
         sessions: list[dict[str, Any]] = []
-        cutoff = now - self.active_seconds
         for row in rows:
             updated = self._row_epoch(row, "updated") or self._row_epoch(row, "created")
             if updated is None or updated < cutoff:
@@ -450,10 +561,12 @@ class SessionService:
             parent_id = parents.get(session_id) or source_parent
             is_subagent = is_subagent or bool(parent_id)
             rollout_path = self._safe_rollout_path(row.get("rollout_path"))
-            events = read_rollout_tail(rollout_path) if rollout_path else []
-            status, activity = classify_activity(
-                events, age_seconds, self.idle_after_seconds
-            )
+            if rollout_path is None:
+                status, activity = classify_activity(
+                    (), age_seconds, self.idle_after_seconds
+                )
+            else:
+                status, activity = self._rollout_activity(rollout_path, age_seconds)
             title = str(
                 row.get("title") or row.get("first_user_message") or "Untitled session"
             )
@@ -492,6 +605,72 @@ class SessionService:
             database_available=True,
         )
         return payload
+
+    def _freshen_snapshot(
+        self, payload: Mapping[str, Any], now: float
+    ) -> dict[str, Any]:
+        """Copy cached data while keeping response timestamps and ages current."""
+
+        fresh = dict(payload)
+        fresh["generated_at"] = _utc_iso(now)
+        sessions: list[dict[str, Any]] = []
+        cutoff = now - self.active_seconds
+        for cached_session in payload.get("sessions", []):
+            if not isinstance(cached_session, Mapping):
+                continue
+            updated = _epoch_seconds(cached_session.get("updated_at"))
+            if updated is not None and updated < cutoff:
+                continue
+            session = dict(cached_session)
+            if updated is not None:
+                age_seconds = max(0, int(now - updated))
+                session["age_seconds"] = age_seconds
+                if age_seconds >= self.idle_after_seconds:
+                    session["status"] = "idle"
+                    session["activity"] = "Idle"
+            sessions.append(session)
+        counts = {status: 0 for status in STATUSES}
+        for session in sessions:
+            status = session.get("status")
+            if status in counts:
+                counts[str(status)] += 1
+        fresh["sessions"] = sessions
+        fresh["counts"] = counts
+        return fresh
+
+    def sessions_payload(self) -> dict[str, Any]:
+        """Return a short-lived, single-flight snapshot for polling clients."""
+
+        while True:
+            cache_now = self._monotonic()
+            wall_now = self._now()
+            with self._snapshot_condition:
+                if (
+                    self._snapshot_payload is not None
+                    and cache_now < self._snapshot_expires_at
+                ):
+                    return self._freshen_snapshot(self._snapshot_payload, wall_now)
+                if not self._snapshot_building:
+                    self._snapshot_building = True
+                    break
+                self._snapshot_condition.wait()
+
+        try:
+            payload = self._build_sessions_payload(wall_now)
+        except BaseException:
+            with self._snapshot_condition:
+                self._snapshot_building = False
+                self._snapshot_condition.notify_all()
+            raise
+
+        with self._snapshot_condition:
+            self._snapshot_payload = payload
+            self._snapshot_expires_at = (
+                self._monotonic() + self.snapshot_cache_seconds
+            )
+            self._snapshot_building = False
+            self._snapshot_condition.notify_all()
+        return self._freshen_snapshot(payload, wall_now)
 
     def known_chat_models(self) -> list[str]:
         """Return safe model identifiers observed in unarchived local threads."""
@@ -685,14 +864,17 @@ def map_codex_chat_event(
 
 
 class _ChatJob:
-    def __init__(self, session_id: str) -> None:
+    def __init__(self, session_id: str, deadline: float) -> None:
         self.session_id = session_id
+        self.deadline = deadline
         self.process: subprocess.Popen[bytes] | Any | None = None
         self.events: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=128)
         self.stop_event = threading.Event()
         self.cancelled = threading.Event()
+        self.timed_out = threading.Event()
         self.finished = threading.Event()
         self.threads: list[threading.Thread] = []
+        self.watchdog: threading.Thread | None = None
         self.stderr_tail = bytearray()
 
 
@@ -906,7 +1088,7 @@ class CodexChatService:
                 raise ChatBusyError("session")
             if len(self._active) >= self.max_concurrent:
                 raise ChatBusyError("global")
-            job = _ChatJob(session_id)
+            job = _ChatJob(session_id, self.monotonic() + self.timeout_seconds)
             self._active[session_id] = job
             return job
 
@@ -979,6 +1161,50 @@ class CodexChatService:
                     pipe.close()
                 except OSError:
                     pass
+
+    def _write_stdin(self, job: _ChatJob, message: str) -> None:
+        """Write the prompt off-thread so a full pipe cannot block the request."""
+
+        pipe = job.process.stdin if job.process is not None else None
+        failed = False
+        try:
+            if pipe is None:
+                raise OSError("Codex stdin is unavailable")
+            value: bytes | str = message.encode("utf-8")
+            while value and not job.stop_event.is_set():
+                try:
+                    written = pipe.write(value)
+                except TypeError:
+                    if isinstance(value, bytes):
+                        value = value.decode("utf-8")
+                        continue
+                    raise
+                if written is None:
+                    break
+                if not isinstance(written, int) or written <= 0:
+                    raise OSError("Codex stdin stopped accepting data")
+                value = value[written:]
+        except (BrokenPipeError, OSError, ValueError, TypeError):
+            failed = True
+        finally:
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except (BrokenPipeError, OSError, ValueError):
+                    failed = True
+            if failed and not job.stop_event.is_set():
+                self._queue_event(job, "stdin_error")
+
+    def _deadline_watchdog(self, job: _ChatJob) -> None:
+        remaining = max(0.0, job.deadline - self.monotonic())
+        if job.finished.wait(remaining):
+            return
+        job.timed_out.set()
+        job.stop_event.set()
+        if job.process is not None:
+            self._terminate_process(job.process)
+        self._close_job_pipes(job)
+        self._finish(job)
 
     @staticmethod
     def _close_job_pipes(job: _ChatJob) -> None:
@@ -1092,36 +1318,37 @@ class CodexChatService:
         with self._condition:
             job.process = process
             cancelled = self._closed or job.cancelled.is_set()
-        if cancelled:
+        expired = self.monotonic() >= job.deadline
+        if cancelled or expired:
+            if expired:
+                job.timed_out.set()
             self._terminate_process(process)
             self._finish(job)
-            raise ChatUnavailableError("chat service is closed")
+            message_text = (
+                "chat request timed out" if expired else "chat service is closed"
+            )
+            raise ChatUnavailableError(message_text)
 
         job.threads = [
             threading.Thread(target=self._read_stdout, args=(job,), daemon=True),
             threading.Thread(target=self._read_stderr, args=(job,), daemon=True),
+            threading.Thread(target=self._write_stdin, args=(job, message), daemon=True),
         ]
         for thread in job.threads:
             thread.start()
-        try:
-            if process.stdin is None:
-                raise OSError("Codex stdin is unavailable")
-            payload = message.encode("utf-8")
-            try:
-                process.stdin.write(payload)
-            except TypeError:
-                process.stdin.write(message)
-            process.stdin.close()
-        except (BrokenPipeError, OSError, ValueError, TypeError) as error:
-            self.cancel(job)
-            raise ChatUnavailableError("could not send prompt to Codex") from error
+        job.watchdog = threading.Thread(
+            target=self._deadline_watchdog,
+            args=(job,),
+            daemon=True,
+        )
+        job.watchdog.start()
         return job
 
     def events_for(self, job: _ChatJob) -> Iterable[dict[str, Any]]:
         process = job.process
         if process is None:
             return
-        deadline = self.monotonic() + self.timeout_seconds
+        deadline = job.deadline
         stdout_done = False
         failed = False
         reported_error = False
@@ -1130,7 +1357,8 @@ class CodexChatService:
         try:
             while not job.cancelled.is_set():
                 remaining = deadline - self.monotonic()
-                if remaining <= 0:
+                if job.timed_out.is_set() or remaining <= 0:
+                    job.timed_out.set()
                     self._terminate_process(process)
                     failed = True
                     reported_error = True
@@ -1153,6 +1381,16 @@ class CodexChatService:
                 if kind == "stdout_done":
                     stdout_done = True
                     continue
+                if kind == "stdin_error":
+                    self._terminate_process(process)
+                    failed = True
+                    reported_error = True
+                    yield {
+                        "type": "error",
+                        "code": "codex_failed",
+                        "message": "Codex request failed",
+                    }
+                    break
                 if kind == "overlong":
                     self._terminate_process(process)
                     failed = True
@@ -1335,7 +1573,14 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
         if not head:
             self.wfile.write(body)
 
-    def _send_ndjson_headers(self) -> None:
+    def _set_stream_write_deadline(self, deadline: float) -> None:
+        remaining = deadline - self.chat_service.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("chat response deadline expired")
+        self.connection.settimeout(remaining)
+
+    def _send_ndjson_headers(self, deadline: float) -> None:
+        self._set_stream_write_deadline(deadline)
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -1345,13 +1590,14 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
-    def _write_ndjson(self, value: Mapping[str, Any]) -> None:
+    def _write_ndjson(self, value: Mapping[str, Any], deadline: float) -> None:
         line = json.dumps(
             value,
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
         ).encode("utf-8") + b"\n"
+        self._set_stream_write_deadline(deadline)
         self.wfile.write(line)
         self.wfile.flush()
 
@@ -1449,12 +1695,13 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            self._send_ndjson_headers()
+            self._send_ndjson_headers(job.deadline)
             self._write_ndjson(
-                {"type": "status", "status": "started", "message": "已开始处理"}
+                {"type": "status", "status": "started", "message": "已开始处理"},
+                job.deadline,
             )
             for event in self.chat_service.events_for(job):
-                self._write_ndjson(event)
+                self._write_ndjson(event, job.deadline)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         except Exception:
@@ -1464,9 +1711,12 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
                         "type": "error",
                         "code": "internal_error",
                         "message": "Codex chat stopped unexpectedly",
-                    }
+                    },
+                    job.deadline,
                 )
-                self._write_ndjson({"type": "done", "ok": False})
+                self._write_ndjson(
+                    {"type": "done", "ok": False}, job.deadline
+                )
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
         finally:

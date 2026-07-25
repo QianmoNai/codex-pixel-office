@@ -338,7 +338,7 @@ python3 tools/make_pixel_assets.py
 python3 tools/make_pixel_assets.py --check-only
 ```
 
-当前测试套件包含 39 项后端与桌面测试，覆盖真实 GTK/WebKit 页面冒烟测试、Windows WebView2 页面就绪协议、`codex.cmd` 命令解析、Windows 进程树清理、代理环境下的回环启动、特殊路径下的只读 SQLite、聊天生命周期、模型目录、输入边界、回环限制、Host 校验和静态路径穿越防护。
+当前测试套件覆盖后端与桌面行为，包括真实 GTK/WebKit 页面冒烟测试、Windows WebView2 页面就绪协议、`codex.cmd` 命令解析、Windows 进程树清理、代理环境下的回环启动、特殊路径下的只读 SQLite、会话缓存与并发刷新、聊天生命周期与硬超时、模型目录、输入边界、回环限制、Host 校验和静态路径穿越防护。
 
 ## 🩺 常见问题
 

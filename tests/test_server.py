@@ -450,6 +450,129 @@ print("stderr-secret", file=sys.stderr, flush=True)
         self.assertNotIn("should remain private", child["activity"])
         self.assertIsInstance(child["color_seed"], int)
 
+    def test_database_prefilters_active_rows_and_only_loads_their_edges(self):
+        connection = sqlite3.connect(self.database)
+        connection.execute(
+            "INSERT INTO thread_spawn_edges VALUES (?, ?, ?)",
+            ("parent-1111", "old-3333", "closed"),
+        )
+        connection.commit()
+        connection.close()
+
+        service = self.service()
+        rows, parents = service._read_database(self.NOW - service.active_seconds)
+        self.assertEqual(
+            {"parent-1111", "child-2222"},
+            {str(row["id"]) for row in rows},
+        )
+        self.assertEqual({"child-2222": "parent-1111"}, parents)
+
+    def test_active_sql_filter_keeps_old_iso_timestamp_schemas_compatible(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            home = Path(tempdir) / ".codex"
+            home.mkdir()
+            database = home / "state_5.sqlite"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, updated_at TEXT)"
+            )
+            connection.executemany(
+                "INSERT INTO threads VALUES (?, ?, ?)",
+                [
+                    ("iso-active", "missing.jsonl", server._utc_iso(self.NOW - 5)),
+                    ("iso-old", "missing.jsonl", server._utc_iso(self.NOW - 4000)),
+                ],
+            )
+            connection.commit()
+            connection.close()
+
+            payload = server.SessionService(
+                home,
+                30,
+                now=lambda: self.NOW,
+                snapshot_cache_seconds=0,
+            ).sessions_payload()
+            self.assertEqual(["iso-active"], [item["id"] for item in payload["sessions"]])
+
+    def test_rollout_classification_cache_invalidates_on_file_change(self):
+        service = server.SessionService(
+            self.home,
+            30,
+            now=lambda: self.NOW,
+            snapshot_cache_seconds=0,
+        )
+        original_reader = server.read_rollout_tail
+        with mock.patch.object(
+            server, "read_rollout_tail", wraps=original_reader
+        ) as reader:
+            first = service.sessions_payload()
+            second = service.sessions_payload()
+            self.assertEqual(2, reader.call_count)
+            self.assertEqual(first["counts"], second["counts"])
+
+            child_rollout = self.home / "sessions" / "child.jsonl"
+            with child_rollout.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event("task_complete")) + "\n")
+            changed = service.sessions_payload()
+
+        self.assertEqual(3, reader.call_count)
+        child = next(item for item in changed["sessions"] if item["id"] == "child-2222")
+        self.assertEqual("waiting", child["status"])
+
+    def test_session_snapshot_is_single_flight_and_refreshes_volatile_fields(self):
+        wall_clock = [self.NOW]
+        monotonic_clock = [100.0]
+        service = server.SessionService(
+            self.home,
+            30,
+            now=lambda: wall_clock[0],
+            monotonic=lambda: monotonic_clock[0],
+            snapshot_cache_seconds=10,
+        )
+        original_builder = service._build_sessions_payload
+        entered = threading.Event()
+        release = threading.Event()
+        build_count = 0
+        count_lock = threading.Lock()
+
+        def slow_builder(now):
+            nonlocal build_count
+            with count_lock:
+                build_count += 1
+            entered.set()
+            self.assertTrue(release.wait(2))
+            return original_builder(now)
+
+        results = []
+        with mock.patch.object(service, "_build_sessions_payload", side_effect=slow_builder):
+            workers = [
+                threading.Thread(target=lambda: results.append(service.sessions_payload()))
+                for _ in range(6)
+            ]
+            for worker in workers:
+                worker.start()
+            self.assertTrue(entered.wait(1))
+            release.set()
+            for worker in workers:
+                worker.join(timeout=2)
+                self.assertFalse(worker.is_alive())
+
+            self.assertEqual(1, build_count)
+            self.assertEqual(6, len(results))
+            initial_age = results[0]["sessions"][0]["age_seconds"]
+            initial_generated_at = results[0]["generated_at"]
+
+            wall_clock[0] += 3
+            cached = service.sessions_payload()
+            self.assertEqual(1, build_count)
+            self.assertEqual(initial_age + 3, cached["sessions"][0]["age_seconds"])
+            self.assertNotEqual(initial_generated_at, cached["generated_at"])
+
+            monotonic_clock[0] += 11
+            release.set()
+            service.sessions_payload()
+            self.assertEqual(2, build_count)
+
     def test_chat_event_mapper_only_exposes_allowlisted_content(self):
         secret = "do-not-expose-command-or-reasoning"
         events = [
@@ -817,6 +940,89 @@ print("stderr-secret", file=sys.stderr, flush=True)
             chat.close()
             self.assertIsNotNone(job.process.poll())
             self.assertEqual(0, chat.active_count)
+
+    def test_chat_deadline_covers_blocked_stdin_write(self):
+        write_started = threading.Event()
+        process_released = threading.Event()
+
+        class BlockingStdin:
+            def __init__(self):
+                self.closed = False
+
+            def write(self, value):
+                write_started.set()
+                process_released.wait(2)
+                return len(value)
+
+            def close(self):
+                self.closed = True
+
+        class FakeProcess:
+            pid = None
+
+            def __init__(self):
+                self.stdin = BlockingStdin()
+                self.stdout = io.BytesIO()
+                self.stderr = io.BytesIO()
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("fake", timeout)
+                return self.returncode
+
+            def terminate(self):
+                self.returncode = -15
+                process_released.set()
+
+            def kill(self):
+                self.returncode = -9
+                process_released.set()
+
+        process = FakeProcess()
+        chat = server.CodexChatService(
+            self.service(),
+            runner=lambda *args, **kwargs: process,
+            platform_name="other",
+            timeout_seconds=0.15,
+            heartbeat_seconds=0.02,
+            terminate_grace_seconds=0.01,
+        )
+        started_at = time.monotonic()
+        job = chat.start("parent-1111", "blocked prompt", self.home)
+        self.assertTrue(write_started.wait(1))
+        self.assertLess(time.monotonic() - started_at, 1)
+
+        events = list(chat.events_for(job))
+        self.assertEqual(
+            "timeout",
+            next(item for item in events if item["type"] == "error")["code"],
+        )
+        self.assertFalse(events[-1]["ok"])
+        self.assertIsNotNone(process.poll())
+        self.assertEqual(0, chat.active_count)
+
+    def test_ndjson_writes_use_the_remaining_chat_deadline(self):
+        class FakeConnection:
+            def __init__(self):
+                self.timeouts = []
+
+            def settimeout(self, value):
+                self.timeouts.append(value)
+
+        handler = object.__new__(server.PixelOfficeHandler)
+        handler.chat_service = mock.Mock(monotonic=lambda: 10.0)
+        handler.connection = FakeConnection()
+        handler.wfile = io.BytesIO()
+
+        handler._write_ndjson({"type": "status"}, 12.5)
+        self.assertEqual([2.5], handler.connection.timeouts)
+        self.assertEqual(b'{"type":"status"}\n', handler.wfile.getvalue())
+        with self.assertRaises(TimeoutError):
+            handler._write_ndjson({"type": "done"}, 9.0)
 
     def test_missing_rollout_and_missing_database_are_safe(self):
         (self.home / "sessions" / "child.jsonl").unlink()
