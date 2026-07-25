@@ -1,0 +1,61 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cross-platform:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install Windows desktop dependencies
+        if: runner.os == 'Windows'
+        run: python -m pip install -r requirements-windows.txt
+      - name: Check real pywebview settings contract
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          python -c "from collections.abc import MutableMapping; import webview; assert isinstance(webview.settings, MutableMapping); webview.settings['ALLOW_DOWNLOADS'] = False"
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Check JavaScript syntax
+        run: node --check static/app.js
+      - name: Check Windows launchers
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          .\start-windows.ps1 --help
+          .\run-windows.ps1 --help
+          & .\start-windows.cmd --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & .\run-windows.cmd --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check Windows Start menu installer round trip
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $runtime = Join-Path $env:RUNNER_TEMP "WebView2 Fixed Runtime"
+          $programs = Join-Path $env:RUNNER_TEMP "Programs"
+          New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+          New-Item -ItemType File -Path (Join-Path $runtime "msedgewebview2.exe") -Force | Out-Null
+          $env:CODEX_PIXEL_WEBVIEW2_RUNTIME = $runtime
+          & .\install-windows.cmd -SkipDependencies -ProgramsDirectory $programs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $shortcut = Join-Path $programs "Codex Pixel Office\Codex Pixel Office.lnk"
+          if (-not (Test-Path -LiteralPath $shortcut -PathType Leaf)) {
+            throw "Start menu shortcut was not created"
+          }
+          & .\uninstall-windows.cmd -ProgramsDirectory $programs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (Test-Path -LiteralPath $shortcut) {
+            throw "Start menu shortcut was not removed"
+          }

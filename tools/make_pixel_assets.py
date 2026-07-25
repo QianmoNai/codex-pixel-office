@@ -39,6 +39,7 @@ BOSS_SIZE = (
 ICON_LOGICAL_SIZE = (12, 12)
 ICON_SCALE = 3
 ICON_SIZE = (ICON_LOGICAL_SIZE[0] * ICON_SCALE, ICON_LOGICAL_SIZE[1] * ICON_SCALE)
+WINDOWS_ICON_SIZES = (16, 32, 48, 64, 128, 256)
 
 RGBA = tuple[int, int, int, int]
 
@@ -680,7 +681,8 @@ def validate_assets() -> list[Path]:
         for kind in ("working", "thinking", "waiting", "done", "error")
     ]
     boss_path = ASSET_DIR / "boss.png"
-    paths = [background_path, *worker_paths, *icon_paths, boss_path]
+    windows_icon_path = ASSET_DIR / "app-icon.ico"
+    paths = [background_path, *worker_paths, *icon_paths, boss_path, windows_icon_path]
     missing = [path for path in paths if not path.is_file()]
     if missing:
         raise AssertionError(f"missing generated assets: {', '.join(map(str, missing))}")
@@ -734,6 +736,14 @@ def validate_assets() -> list[Path]:
                 raise AssertionError(f"boss.png: corner {corner} is not transparent")
         assert_nearest_blocks(boss, BOSS_SCALE, boss_path.name)
 
+    with Image.open(windows_icon_path) as windows_icon:
+        windows_icon.load()
+        sizes = windows_icon.info.get("sizes", set())
+        if windows_icon.format != "ICO" or (256, 256) not in sizes:
+            raise AssertionError(
+                f"app-icon.ico: expected a Windows icon containing 256x256, got {sizes}"
+            )
+
     return paths
 
 
@@ -753,16 +763,27 @@ def generate_assets() -> list[Path]:
     for kind in ("working", "thinking", "waiting", "done", "error"):
         make_status_icon(kind).save(ASSET_DIR / f"status-{kind}.png", format="PNG", optimize=False)
 
+    app_icon_path = ASSET_DIR / "app-icon.png"
+    if not app_icon_path.is_file():
+        raise AssertionError(f"missing source application icon: {app_icon_path}")
+    with Image.open(app_icon_path) as app_icon:
+        app_icon.convert("RGBA").save(
+            ASSET_DIR / "app-icon.ico",
+            format="ICO",
+            sizes=[(size, size) for size in WINDOWS_ICON_SIZES],
+        )
+
     return validate_assets()
 
 
 def print_summary(paths: Iterable[Path]) -> None:
     paths = list(paths)
-    print(f"Validated {len(paths)} deterministic RGBA PNG assets in {ASSET_DIR}")
+    print(f"Validated {len(paths)} deterministic pixel assets in {ASSET_DIR}")
     print(f"  office-bg.png: {BG_SIZE[0]}x{BG_SIZE[1]} (logical {BG_LOGICAL_SIZE[0]}x{BG_LOGICAL_SIZE[1]} @ {BG_SCALE}x)")
     print(f"  worker-00.png .. worker-11.png: {WORKER_SIZE[0]}x{WORKER_SIZE[1]} transparent ({WORKER_SCALE}x)")
     print(f"  boss.png: {BOSS_SIZE[0]}x{BOSS_SIZE[1]} transparent ({BOSS_SCALE}x)")
     print(f"  status-*.png: {ICON_SIZE[0]}x{ICON_SIZE[1]} transparent ({ICON_SCALE}x)")
+    print(f"  app-icon.ico: Windows icon sizes {', '.join(map(str, WINDOWS_ICON_SIZES))}")
     print(f"  office-bg sha256: {sha256(ASSET_DIR / 'office-bg.png')[:16]}...")
 
 

@@ -237,11 +237,100 @@ class SessionServiceTests(unittest.TestCase):
     def service(self):
         return server.SessionService(self.home, 30, now=lambda: self.NOW)
 
+    def test_windows_command_resolution_and_process_group_options(self):
+        batch_path = r"C:\Codex & Tools\codex.cmd"
+        command = server.executable_command(
+            "codex",
+            ["exec", "resume", "session-123", "-"],
+            platform_name="nt",
+            resolver=lambda _value: batch_path,
+            environment={"COMSPEC": r"C:\Windows\System32\cmd.exe"},
+        )
+        self.assertEqual(r"C:\Windows\System32\cmd.exe", command[0])
+        self.assertEqual(["/d", "/s", "/c"], command[1:4])
+        self.assertIn(f'"{batch_path}"', command[4])
+        self.assertIn("session-123", command[4])
+
+        direct = server.executable_command(
+            "codex",
+            ["--version"],
+            platform_name="nt",
+            resolver=lambda _value: r"C:\Tools\codex.exe",
+        )
+        self.assertEqual([r"C:\Tools\codex.exe", "--version"], direct)
+
+        options = server.process_group_options("nt")
+        self.assertIn("creationflags", options)
+        self.assertTrue(
+            options["creationflags"] & server.WINDOWS_CREATE_NEW_PROCESS_GROUP
+        )
+        self.assertTrue(options["creationflags"] & server.WINDOWS_CREATE_NO_WINDOW)
+        self.assertEqual({"start_new_session": True}, server.process_group_options("posix"))
+
+    def test_windows_process_tree_cleanup_uses_taskkill(self):
+        calls = []
+
+        class FakeProcess:
+            pid = 4321
+
+            def __init__(self):
+                self.returncode = None
+                self.kill_calls = 0
+                self.terminate_calls = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self.returncode is None:
+                    raise subprocess.TimeoutExpired("fake", timeout)
+                return self.returncode
+
+            def terminate(self):
+                self.terminate_calls += 1
+
+            def kill(self):
+                self.kill_calls += 1
+                self.returncode = -9
+
+        process = FakeProcess()
+
+        def tree_runner(command, **kwargs):
+            calls.append((command, kwargs))
+            process.returncode = 1
+            return subprocess.CompletedProcess(command, 0)
+
+        chat = server.CodexChatService(
+            self.service(),
+            platform_name="nt",
+            tree_runner=tree_runner,
+        )
+        chat._terminate_process(process)
+        self.assertEqual(1, len(calls))
+        self.assertEqual(["/PID", "4321", "/T", "/F"], calls[0][0][1:])
+        self.assertIn("taskkill", calls[0][0][0].lower())
+        self.assertEqual(0, process.terminate_calls)
+        self.assertEqual(0, process.kill_calls)
+
+    def test_read_only_database_uri_supports_special_paths(self):
+        with tempfile.TemporaryDirectory() as tempdir:
+            home = Path(tempdir) / "用户 # 100%" / ".codex"
+            home.mkdir(parents=True)
+            connection = sqlite3.connect(home / "state_5.sqlite")
+            connection.execute("CREATE TABLE threads (id TEXT PRIMARY KEY)")
+            connection.commit()
+            connection.close()
+
+            payload = server.SessionService(home).health_payload()
+            self.assertEqual("ok", payload["status"])
+            self.assertTrue(payload["database_available"])
+
     def _fake_codex(self):
-        path = Path(self.tempdir.name) / "fake-codex"
-        path.write_text(
-            """#!/usr/bin/env python3
-import json
+        tool_dir = Path(self.tempdir.name) / "Codex & Tools"
+        tool_dir.mkdir(exist_ok=True)
+        script = tool_dir / "fake-codex.py"
+        script.write_text(
+            """import json
 import os
 import sys
 import time
@@ -265,8 +354,20 @@ print("stderr-secret", file=sys.stderr, flush=True)
 """,
             encoding="utf-8",
         )
-        path.chmod(0o755)
-        return path
+        if os.name == "nt":
+            launcher = tool_dir / "fake-codex.cmd"
+            launcher.write_text(
+                f'@echo off\n"{sys.executable}" "{script}" %*\n',
+                encoding="utf-8",
+            )
+            return launcher
+        launcher = tool_dir / "fake-codex"
+        launcher.write_text(
+            f"#!{sys.executable}\n" + script.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        launcher.chmod(0o755)
+        return launcher
 
     def _chat_server(self, chat_service):
         static = Path(self.tempdir.name) / f"chat-static-{time.monotonic_ns()}"

@@ -8,208 +8,50 @@ import json
 import os
 from pathlib import Path
 import sys
-import threading
-import time
 from typing import Iterable
-from urllib.error import URLError
-from urllib.request import urlopen
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-gi.require_version("Gdk", "4.0")
-gi.require_version("WebKit", "6.0")
-from gi.repository import Gdk, Gio, GLib, Gtk, WebKit  # noqa: E402
-
+from desktop_common import (
+    APPLICATION_ID,
+    DEFAULT_STATIC_ROOT,
+    DEFAULT_WINDOW_HEIGHT,
+    DEFAULT_WINDOW_WIDTH,
+    LocalOfficeServer,
+    SMOKE_STATE_SCRIPT,
+    SMOKE_TEST_TIMEOUT_SECONDS,
+    WINDOW_TITLE,
+    normalized_smoke_payload,
+    resolve_icon_path,
+)
 from server import (
     DEFAULT_ACTIVE_MINUTES,
-    PixelOfficeHTTPServer,
-    SessionService,
-    make_handler,
     positive_finite_minutes,
 )
 
 
-APPLICATION_ID = "io.github.qianmo.CodexPixelOffice"
-WINDOW_TITLE = "Codex Pixel Office"
-DEFAULT_WINDOW_WIDTH = 1440
-DEFAULT_WINDOW_HEIGHT = 900
-SERVER_START_TIMEOUT_SECONDS = 5.0
-SERVER_STOP_TIMEOUT_SECONDS = 5.0
-SMOKE_TEST_TIMEOUT_SECONDS = 15.0
+GTK_IMPORT_ERROR: BaseException | None = None
+try:
+    import gi
 
-PROJECT_ROOT = Path(__file__).resolve().parent
-DEFAULT_STATIC_ROOT = PROJECT_ROOT / "static"
+    gi.require_version("Gtk", "4.0")
+    gi.require_version("Gdk", "4.0")
+    gi.require_version("WebKit", "6.0")
+    from gi.repository import Gdk, Gio, GLib, Gtk, WebKit  # noqa: E402
+except (ImportError, ValueError) as error:  # Windows and headless test environments
+    GTK_IMPORT_ERROR = error
+    Gdk = Gio = GLib = Gtk = WebKit = None
 
-
-def resolve_icon_path(static_root: Path | str = DEFAULT_STATIC_ROOT) -> Path | None:
-    """Return the preferred bundled icon, with the status sprite as fallback."""
-
-    assets = Path(static_root).resolve() / "assets"
-    for filename in ("app-icon.png", "status-working.png"):
-        candidate = assets / filename
-        if candidate.is_file():
-            return candidate
-    return None
+GTK_AVAILABLE = GTK_IMPORT_ERROR is None
 
 
-class LocalOfficeServer:
-    """Own the loopback HTTP server and its serving thread."""
-
-    def __init__(
-        self,
-        codex_home: Path | str,
-        active_minutes: float = DEFAULT_ACTIVE_MINUTES,
-        *,
-        static_root: Path | str = DEFAULT_STATIC_ROOT,
-    ) -> None:
-        self.service = SessionService(codex_home, active_minutes)
-        self.static_root = Path(static_root).expanduser().resolve()
-        if not self.static_root.is_dir():
-            raise FileNotFoundError(f"static bundle was not found: {self.static_root}")
-
-        self._server: PixelOfficeHTTPServer | None = None
-        self._thread: threading.Thread | None = None
-        self._lock = threading.RLock()
-        self._close_condition = threading.Condition(self._lock)
-        self._closed = False
-        self._closing = False
-
-    @property
-    def server(self) -> PixelOfficeHTTPServer | None:
-        return self._server
-
-    @property
-    def thread(self) -> threading.Thread | None:
-        return self._thread
-
-    @property
-    def is_running(self) -> bool:
-        thread = self._thread
-        return thread is not None and thread.is_alive() and not self._closed
-
-    @property
-    def url(self) -> str:
-        server = self._server
-        if server is None:
-            raise RuntimeError("the local office server has not been started")
-        return f"http://127.0.0.1:{server.server_port}/"
-
-    def _serve(self) -> None:
-        server = self._server
-        if server is not None:
-            server.serve_forever(poll_interval=0.1)
-
-    def _wait_until_ready(self) -> None:
-        deadline = time.monotonic() + SERVER_START_TIMEOUT_SECONDS
-        health_url = self.url + "api/health"
-        last_error: BaseException | None = None
-        while time.monotonic() < deadline:
-            thread = self._thread
-            if thread is None or not thread.is_alive():
-                raise RuntimeError("the local office server stopped during startup")
-            try:
-                with urlopen(health_url, timeout=0.25) as response:
-                    if response.status == 200:
-                        response.read()
-                        return
-            except (OSError, URLError) as error:
-                last_error = error
-                time.sleep(0.02)
-        message = "timed out while starting the local office server"
-        if last_error is not None:
-            message += f": {last_error}"
-        raise RuntimeError(message)
-
-    def start(self) -> str:
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("a closed local office server cannot be restarted")
-            if self.is_running:
-                return self.url
-
-            configured_handler = make_handler(self.service, self.static_root)
-
-            class QuietDesktopHandler(configured_handler):
-                def log_message(self, _format: str, *_args: object) -> None:
-                    return
-
-            self._server = PixelOfficeHTTPServer(
-                ("127.0.0.1", 0),
-                QuietDesktopHandler,
-            )
-            self._thread = threading.Thread(
-                target=self._serve,
-                name="codex-pixel-office-http",
-                daemon=True,
-            )
-            self._thread.start()
-
-        try:
-            self._wait_until_ready()
-        except BaseException:
-            self.close()
-            raise
-        return self.url
-
-    def close(self) -> None:
-        with self._close_condition:
-            if self._closed:
-                while self._closing:
-                    self._close_condition.wait()
-                return
-            self._closed = True
-            self._closing = True
-            server = self._server
-            thread = self._thread
-
-        try:
-            if server is not None:
-                try:
-                    if thread is not None and thread.is_alive():
-                        server.shutdown()
-                finally:
-                    server.server_close()
-            if thread is not None and thread.is_alive():
-                thread.join(timeout=SERVER_STOP_TIMEOUT_SECONDS)
-        finally:
-            with self._close_condition:
-                self._closing = False
-                self._close_condition.notify_all()
-
-    def __enter__(self) -> "LocalOfficeServer":
-        self.start()
-        return self
-
-    def __exit__(self, *_exc_info: object) -> None:
-        self.close()
+class _UnavailableGtkApplication:
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("GTK4 and WebKitGTK 6 are not available") from GTK_IMPORT_ERROR
 
 
-SMOKE_STATE_SCRIPT = r"""
-(() => {
-  const connection = document.getElementById("connectionText");
-  const emptyOffice = document.getElementById("emptyOffice");
-  const agents = document.querySelectorAll("#agentsLayer .agent[data-session-id]");
-  const actions = [...agents].map((agent) => agent.dataset.action).filter(Boolean);
-  const reactions = [...agents]
-    .flatMap((agent) => [...agent.classList])
-    .filter((name) => name.startsWith("reaction-"));
-  const emptyVisible = Boolean(emptyOffice && !emptyOffice.hidden);
-  return {
-    ready: Boolean(connection && (emptyVisible || (agents.length > 0 && actions.length === agents.length))),
-    sessions: agents.length,
-    empty: emptyVisible,
-    connection: connection ? connection.textContent.trim() : "",
-    actions: [...new Set(actions)].sort(),
-    roaming: document.querySelectorAll("#agentsLayer .agent.is-roaming").length,
-    reactions: [...new Set(reactions)].sort(),
-    roamingEnabled: document.getElementById("roamToggle")?.getAttribute("aria-pressed") === "true"
-  };
-})()
-"""
+_GtkApplicationBase = Gtk.Application if GTK_AVAILABLE else _UnavailableGtkApplication
 
 
-class PixelOfficeApplication(Gtk.Application):
+class PixelOfficeApplication(_GtkApplicationBase):
     def __init__(
         self,
         backend: LocalOfficeServer,
@@ -217,6 +59,8 @@ class PixelOfficeApplication(Gtk.Application):
         fullscreen: bool = False,
         smoke_test: bool = False,
     ) -> None:
+        if not GTK_AVAILABLE:
+            raise RuntimeError("GTK4 and WebKitGTK 6 are not available") from GTK_IMPORT_ERROR
         super().__init__(
             application_id=APPLICATION_ID,
             flags=Gio.ApplicationFlags.NON_UNIQUE,
@@ -351,19 +195,9 @@ class PixelOfficeApplication(Gtk.Application):
             state = json.loads(value.to_json(0))
         except (GLib.Error, TypeError, ValueError, json.JSONDecodeError):
             return
-        if not isinstance(state, dict) or state.get("ready") is not True:
+        payload = normalized_smoke_payload(state)
+        if payload is None:
             return
-
-        sessions = int(state.get("sessions", 0))
-        payload = {
-            "ok": True,
-            "state": "sessions" if sessions else "empty",
-            "sessions": sessions,
-            "actions": state.get("actions", []),
-            "roaming": int(state.get("roaming", 0)),
-            "reactions": state.get("reactions", []),
-            "roaming_enabled": bool(state.get("roamingEnabled", False)),
-        }
         print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), flush=True)
         self._finish_smoke(0)
 
@@ -418,6 +252,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="include sessions updated within this many minutes",
     )
     parser.add_argument(
+        "--codex-bin",
+        default=os.environ.get("CODEX_PIXEL_CODEX_BIN", "codex"),
+        help="Codex CLI executable (for example codex.exe or codex.cmd)",
+    )
+    parser.add_argument(
         "--fullscreen",
         action="store_true",
         help="open the office in fullscreen mode",
@@ -432,6 +271,21 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if not GTK_AVAILABLE:
+        error_payload = {"ok": False, "error": "gtk-unavailable"}
+        if args.smoke_test:
+            print(
+                json.dumps(error_payload, separators=(",", ":")),
+                file=sys.stderr,
+                flush=True,
+            )
+            return 2
+        print(
+            "Could not open Codex Pixel Office: GTK4 and WebKitGTK 6 are not available. "
+            "On Windows, run windows_app.py instead.",
+            file=sys.stderr,
+        )
+        return 1
     display_available = Gtk.init_check() and Gdk.Display.get_default() is not None
     if not display_available:
         if args.smoke_test:
@@ -448,7 +302,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 1
 
     try:
-        backend = LocalOfficeServer(args.codex_home, args.active_minutes)
+        backend = LocalOfficeServer(
+            args.codex_home,
+            args.active_minutes,
+            codex_bin=args.codex_bin,
+        )
         backend.start()
     except (OSError, RuntimeError, ValueError) as error:
         print(f"Could not start Codex Pixel Office: {error}", file=sys.stderr)

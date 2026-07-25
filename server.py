@@ -49,6 +49,8 @@ DEFAULT_CHAT_TERMINATE_GRACE_SECONDS = 1.0
 DEFAULT_MODEL_CATALOG_TIMEOUT_SECONDS = 5.0
 MAX_MODEL_CATALOG_BYTES = 2 * 1024 * 1024
 CHAT_MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
+WINDOWS_CREATE_NO_WINDOW = 0x08000000
 
 TOOL_CALL_TYPES = {"custom_tool_call", "function_call"}
 TOOL_OUTPUT_TYPES = {"custom_tool_call_output", "function_call_output"}
@@ -81,6 +83,51 @@ def valid_chat_model(value: Any) -> bool:
         and 1 <= len(value) <= MAX_CHAT_MODEL_CHARS
         and CHAT_MODEL_PATTERN.fullmatch(value) is not None
     )
+
+
+def executable_command(
+    executable: Path | str,
+    arguments: Sequence[str],
+    *,
+    platform_name: str | None = None,
+    resolver: Callable[[str], str | None] = shutil.which,
+    environment: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Resolve an executable and safely bridge Windows batch launchers."""
+
+    platform_name = os.name if platform_name is None else platform_name
+    executable_text = str(executable)
+    resolved = resolver(executable_text) or executable_text
+    command = [resolved, *[str(argument) for argument in arguments]]
+    if platform_name != "nt" or Path(resolved).suffix.lower() not in {".bat", ".cmd"}:
+        return command
+
+    variables = os.environ if environment is None else environment
+    comspec = variables.get("COMSPEC") or "cmd.exe"
+    # cmd.exe needs the batch file as one command string. The executable is
+    # always quoted so metacharacters in an installation path stay literal;
+    # all user-controlled values in arguments are separately allowlisted.
+    quoted_executable = f'"{resolved.replace("%", "%%")}"'
+    argument_line = subprocess.list2cmdline(command[1:])
+    inner = f"{quoted_executable} {argument_line}" if argument_line else quoted_executable
+    return [comspec, "/d", "/s", "/c", f'"{inner}"']
+
+
+def process_group_options(platform_name: str | None = None) -> dict[str, Any]:
+    """Return platform-specific Popen options for reliable tree cleanup."""
+
+    platform_name = os.name if platform_name is None else platform_name
+    if platform_name == "posix":
+        return {"start_new_session": True}
+    if platform_name == "nt":
+        flags = getattr(
+            subprocess,
+            "CREATE_NEW_PROCESS_GROUP",
+            WINDOWS_CREATE_NEW_PROCESS_GROUP,
+        )
+        flags |= getattr(subprocess, "CREATE_NO_WINDOW", WINDOWS_CREATE_NO_WINDOW)
+        return {"creationflags": flags}
+    return {}
 
 
 def _utc_iso(epoch_seconds: float) -> str:
@@ -664,8 +711,12 @@ class CodexChatService:
         terminate_grace_seconds: float = DEFAULT_CHAT_TERMINATE_GRACE_SECONDS,
         allowed_models: Iterable[str] | None = None,
         default_model: str | None = None,
-        catalog_runner: Callable[..., Any] = subprocess.run,
+        catalog_runner: Callable[..., Any] | None = None,
+        catalog_popen: Callable[..., Any] = subprocess.Popen,
         catalog_timeout_seconds: float = DEFAULT_MODEL_CATALOG_TIMEOUT_SECONDS,
+        tree_runner: Callable[..., Any] = subprocess.run,
+        executable_resolver: Callable[[str], str | None] = shutil.which,
+        platform_name: str | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.session_service = session_service
@@ -694,7 +745,11 @@ class CodexChatService:
             raise ValueError("default_model must be included in allowed_models")
         self.default_model = default_model
         self.catalog_runner = catalog_runner
+        self.catalog_popen = catalog_popen
         self.catalog_timeout_seconds = max(0.1, float(catalog_timeout_seconds))
+        self.tree_runner = tree_runner
+        self.executable_resolver = executable_resolver
+        self.platform_name = os.name if platform_name is None else platform_name
         self.monotonic = monotonic
         self._condition = threading.Condition()
         self._active: dict[str, _ChatJob] = {}
@@ -708,26 +763,66 @@ class CodexChatService:
     def model_is_allowed(self, model: str | None) -> bool:
         return model is None or self.allowed_models is None or model in self.allowed_models
 
+    def _codex_command(self, *arguments: str) -> list[str]:
+        return executable_command(
+            self.codex_bin,
+            arguments,
+            platform_name=self.platform_name,
+            resolver=self.executable_resolver,
+        )
+
+    def _run_catalog_process(self, command: Sequence[str], **kwargs: Any) -> Any | None:
+        try:
+            process = self.catalog_popen(
+                command,
+                **kwargs,
+                **process_group_options(self.platform_name),
+            )
+        except (OSError, TypeError, ValueError):
+            return None
+        try:
+            stdout, _stderr = process.communicate(timeout=self.catalog_timeout_seconds)
+        except subprocess.TimeoutExpired:
+            self._terminate_process(process)
+            return None
+        except (OSError, ValueError):
+            self._terminate_process(process)
+            return None
+        return subprocess.CompletedProcess(
+            command,
+            process.returncode,
+            stdout=stdout,
+            stderr=b"",
+        )
+
     def _bundled_model_catalog(self) -> list[dict[str, str]] | None:
         environment = os.environ.copy()
         environment["CODEX_HOME"] = str(self.session_service.codex_home)
         cwd = self.session_service.codex_home
         if not cwd.is_dir():
             cwd = Path.home()
-        command = [self.codex_bin, "debug", "models", "--bundled"]
+        command = self._codex_command("debug", "models", "--bundled")
+        runner_kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.DEVNULL,
+            "cwd": str(cwd),
+            "env": environment,
+            "shell": False,
+        }
         try:
-            result = self.catalog_runner(
-                command,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                cwd=str(cwd),
-                env=environment,
-                shell=False,
-                timeout=self.catalog_timeout_seconds,
-                check=False,
-            )
+            if self.catalog_runner is None:
+                result = self._run_catalog_process(command, **runner_kwargs)
+            else:
+                result = self.catalog_runner(
+                    command,
+                    **runner_kwargs,
+                    timeout=self.catalog_timeout_seconds,
+                    check=False,
+                )
         except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
+            return None
+        if result is None:
             return None
         if getattr(result, "returncode", 1) != 0:
             return None
@@ -906,21 +1001,49 @@ class CodexChatService:
                 return
         except (OSError, ValueError):
             return
-        try:
-            if os.name == "posix" and getattr(process, "pid", None):
-                os.killpg(process.pid, signal.SIGTERM)
-            else:
-                process.terminate()
-        except (OSError, ProcessLookupError):
-            pass
+        pid = getattr(process, "pid", None)
+        if self.platform_name == "nt" and pid:
+            system_root = os.environ.get("SystemRoot")
+            taskkill = (
+                str(Path(system_root) / "System32" / "taskkill.exe")
+                if system_root
+                else "taskkill.exe"
+            )
+            try:
+                self.tree_runner(
+                    [taskkill, "/PID", str(pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=max(1.0, self.terminate_grace_seconds),
+                    check=False,
+                    creationflags=getattr(
+                        subprocess,
+                        "CREATE_NO_WINDOW",
+                        WINDOWS_CREATE_NO_WINDOW,
+                    ),
+                )
+            except (OSError, subprocess.TimeoutExpired, TypeError, ValueError):
+                try:
+                    process.terminate()
+                except (OSError, ProcessLookupError):
+                    pass
+        else:
+            try:
+                if self.platform_name == "posix" and pid:
+                    os.killpg(pid, signal.SIGTERM)
+                else:
+                    process.terminate()
+            except (OSError, ProcessLookupError):
+                pass
         try:
             process.wait(timeout=self.terminate_grace_seconds)
             return
         except (subprocess.TimeoutExpired, OSError, ValueError):
             pass
         try:
-            if os.name == "posix" and getattr(process, "pid", None):
-                os.killpg(process.pid, signal.SIGKILL)
+            if self.platform_name == "posix" and pid:
+                os.killpg(pid, signal.SIGKILL)
             else:
                 process.kill()
         except (OSError, ProcessLookupError):
@@ -938,16 +1061,16 @@ class CodexChatService:
         model: str | None = None,
     ) -> _ChatJob:
         job = self._reserve(session_id)
-        command = [
-            self.codex_bin,
+        arguments = [
             "exec",
             "resume",
             "--json",
             "--skip-git-repo-check",
         ]
         if model is not None:
-            command.extend(["--model", model])
-        command.extend([session_id, "-"])
+            arguments.extend(["--model", model])
+        arguments.extend([session_id, "-"])
+        command = self._codex_command(*arguments)
         environment = os.environ.copy()
         environment["CODEX_HOME"] = str(self.session_service.codex_home)
         try:
@@ -960,7 +1083,7 @@ class CodexChatService:
                 env=environment,
                 shell=False,
                 bufsize=0,
-                start_new_session=True,
+                **process_group_options(self.platform_name),
             )
         except (OSError, ValueError) as error:
             self._finish(job)
@@ -1488,6 +1611,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="include sessions updated within this many minutes",
     )
     parser.add_argument(
+        "--codex-bin",
+        default=os.environ.get("CODEX_PIXEL_CODEX_BIN", "codex"),
+        help="Codex CLI executable (for example codex.exe or codex.cmd)",
+    )
+    parser.add_argument(
         "--open-browser",
         action="store_true",
         help="open the dashboard after the server has bound its final port",
@@ -1501,8 +1629,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise SystemExit("--port must be between 0 and 65535")
     service = SessionService(args.codex_home, args.active_minutes)
     static_root = Path(__file__).resolve().parent / "static"
+    chat_service = CodexChatService(service, codex_bin=args.codex_bin)
     server = PixelOfficeHTTPServer(
-        (args.host, args.port), make_handler(service, static_root)
+        (args.host, args.port), make_handler(service, static_root, chat_service)
     )
     bound_host, bound_port = server.server_address[:2]
     display_host = args.host or bound_host
@@ -1514,8 +1643,13 @@ def main(argv: Iterable[str] | None = None) -> int:
     print(f"Codex Pixel Office: {dashboard_url}", flush=True)
     if args.open_browser:
         try:
-            webbrowser.open(dashboard_url)
-        except webbrowser.Error as error:
+            opened = webbrowser.open(dashboard_url)
+            if opened is False:
+                print(
+                    f"Could not open a browser automatically. Open {dashboard_url} manually.",
+                    file=sys.stderr,
+                )
+        except (OSError, webbrowser.Error) as error:
             print(f"Could not open a browser: {error}", file=sys.stderr)
     try:
         server.serve_forever(poll_interval=0.25)

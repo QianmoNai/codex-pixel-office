@@ -102,6 +102,24 @@ class LocalOfficeServerTests(unittest.TestCase):
         self.assertIsNotNone(thread)
         self.assertFalse(thread.is_alive())
 
+    def test_readiness_probe_ignores_http_proxy_environment(self):
+        backend = desktop_app.LocalOfficeServer(
+            self.codex_home,
+            static_root=self.static_root,
+        )
+        proxy_environment = {
+            "HTTP_PROXY": "http://127.0.0.1:1",
+            "http_proxy": "http://127.0.0.1:1",
+            "NO_PROXY": "",
+            "no_proxy": "",
+        }
+        try:
+            with mock.patch.dict(os.environ, proxy_environment):
+                url = backend.start()
+            self.assertTrue(url.startswith("http://127.0.0.1:"))
+        finally:
+            backend.close()
+
     def test_concurrent_close_waits_for_shutdown_to_finish(self):
         backend = desktop_app.LocalOfficeServer(
             self.codex_home,
@@ -157,59 +175,43 @@ class LocalOfficeServerTests(unittest.TestCase):
 
     def test_close_cleans_chat_service_owned_child(self):
         chat_service = FakeChatService()
-        real_make_handler = desktop_app.make_handler
-
-        def make_handler_with_fake_chat(service, static_root):
-            return real_make_handler(service, static_root, chat_service)
-
-        with mock.patch.object(
-            desktop_app,
-            "make_handler",
-            side_effect=make_handler_with_fake_chat,
-        ):
-            backend = desktop_app.LocalOfficeServer(
-                self.codex_home,
-                static_root=self.static_root,
-            )
-            backend.start()
-            self.assertTrue(chat_service.child_running)
-            backend.close()
+        backend = desktop_app.LocalOfficeServer(
+            self.codex_home,
+            static_root=self.static_root,
+            chat_service=chat_service,
+        )
+        backend.start()
+        self.assertTrue(chat_service.child_running)
+        backend.close()
 
         self.assertFalse(chat_service.child_running)
         self.assertGreaterEqual(chat_service.close_calls, 1)
         self.assertEqual(0, chat_service.start_calls)
 
     def test_webkit_smoke_does_not_start_chat(self):
+        if not desktop_app.GTK_AVAILABLE:
+            self.skipTest("GTK4 and WebKitGTK 6 are not available")
         desktop_app.Gtk.init_check()
         if desktop_app.Gdk.Display.get_default() is None:
             self.skipTest("a graphical display is required for the WebKit smoke test")
 
         chat_service = FakeChatService()
-        real_make_handler = desktop_app.make_handler
-
-        def make_handler_with_fake_chat(service, static_root):
-            return real_make_handler(service, static_root, chat_service)
-
-        with mock.patch.object(
-            desktop_app,
-            "make_handler",
-            side_effect=make_handler_with_fake_chat,
-        ):
-            backend = desktop_app.LocalOfficeServer(
-                self.codex_home,
-                static_root=PROJECT_ROOT / "static",
-            )
-            backend.start()
-            application = desktop_app.PixelOfficeApplication(
-                backend,
-                smoke_test=True,
-            )
-            output = io.StringIO()
-            try:
-                with redirect_stdout(output):
-                    run_status = application.run([])
-            finally:
-                backend.close()
+        backend = desktop_app.LocalOfficeServer(
+            self.codex_home,
+            static_root=PROJECT_ROOT / "static",
+            chat_service=chat_service,
+        )
+        backend.start()
+        application = desktop_app.PixelOfficeApplication(
+            backend,
+            smoke_test=True,
+        )
+        output = io.StringIO()
+        try:
+            with redirect_stdout(output):
+                run_status = application.run([])
+        finally:
+            backend.close()
 
         self.assertEqual(0, run_status)
         self.assertEqual(0, application.exit_code)
@@ -228,12 +230,15 @@ class DesktopArgumentTests(unittest.TestCase):
                 "/tmp/codex-test-home",
                 "--active-minutes",
                 "7.5",
+                "--codex-bin",
+                "/tmp/codex-test-bin",
                 "--fullscreen",
                 "--smoke-test",
             ]
         )
         self.assertEqual("/tmp/codex-test-home", args.codex_home)
         self.assertEqual(7.5, args.active_minutes)
+        self.assertEqual("/tmp/codex-test-bin", args.codex_bin)
         self.assertTrue(args.fullscreen)
         self.assertTrue(args.smoke_test)
 
@@ -290,7 +295,10 @@ class DesktopArgumentTests(unittest.TestCase):
         ]
         self.assertTrue(json_lines, result.stderr)
         self.assertEqual(
-            {"ok": False, "error": "display-unavailable"},
+            {
+                "ok": False,
+                "error": "display-unavailable" if desktop_app.GTK_AVAILABLE else "gtk-unavailable",
+            },
             json.loads(json_lines[-1]),
         )
 
