@@ -1,92 +1,324 @@
-# Codex Pixel Office
+<div align="center">
+  <img src="static/assets/app-icon.png" alt="Codex Pixel Office 图标" width="128" />
+  <h1>Codex Pixel Office</h1>
+  <p><strong>把真实 Codex 会话变成一间会思考、协作和工作的像素办公室。</strong></p>
+  <p>在一个本地优先的桌面空间里，观察主会话与子代理的实时状态，点击像素员工继续对话，并从老板视角巡视你的 AI 团队。</p>
 
-把本机正在活动的 Codex 会话变成办公室里的像素员工。主会话和子代理会自动出现，角色状态会随真实事件变化。默认“活跃”是最近 30 分钟内有更新的未归档会话。
+  <p>
+    <a href="VERSION.md"><img src="https://img.shields.io/badge/version-v0.1.0%20Preview-f2a65a?style=flat-square" alt="版本 v0.1.0 Preview" /></a>
+    <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 或更高版本" />
+    <img src="https://img.shields.io/badge/Desktop-GTK4-7fe719?style=flat-square&logo=gtk&logoColor=1b1f23" alt="GTK4 桌面应用" />
+    <img src="https://img.shields.io/badge/Privacy-local--first-35b27f?style=flat-square" alt="本地优先" />
+  </p>
 
-![Codex Pixel Office 预览](preview.png)
+  <p>
+    <a href="#-快速开始">快速开始</a> ·
+    <a href="#-功能亮点">功能亮点</a> ·
+    <a href="#-工作原理">工作原理</a> ·
+    <a href="#-隐私与安全">隐私与安全</a> ·
+    <a href="VERSION.md">版本声明</a>
+  </p>
+</div>
 
-## 安装为桌面软件
+<p align="center">
+  <img src="static/assets/worker-00.png" alt="像素员工 1" width="42" />
+  <img src="static/assets/worker-01.png" alt="像素员工 2" width="42" />
+  <img src="static/assets/worker-02.png" alt="像素员工 3" width="42" />
+  <img src="static/assets/worker-03.png" alt="像素员工 4" width="42" />
+  <img src="static/assets/worker-04.png" alt="像素员工 5" width="42" />
+  <img src="static/assets/worker-05.png" alt="像素员工 6" width="42" />
+  <img src="static/assets/worker-06.png" alt="像素员工 7" width="42" />
+  <img src="static/assets/worker-07.png" alt="像素员工 8" width="42" />
+  <img src="static/assets/boss.png" alt="办公室老板" width="45" />
+</p>
+
+<p align="center">
+  <img src="preview.png" alt="Codex Pixel Office 主界面：像素办公室、会话工位、状态统计和聊天侧栏" width="100%" />
+</p>
+
+> [!NOTE]
+> Codex Pixel Office 是独立开发的本地工具，不是 OpenAI 官方产品。监控功能只读取本机已有的 Codex 会话状态；模型选择器可能执行一次只读的模型目录查询，只有你在聊天框主动发送消息时才会向 Codex 提交内容并继续原会话。
+
+## ✨ 功能亮点
+
+| | |
+|---|---|
+| **🏢 实时像素办公室**<br>每 2 秒同步最近活跃的 Codex 会话，让每个会话自动入驻自己的工位。 | **🧭 主会话与子代理层级**<br>主会话使用金色标准工位，子代理使用青绿色紧凑工位，并保留父子关系。 |
+| **🎬 状态驱动的角色动作**<br>编写、思考、工具调用、等待和空闲会触发不同动作、气泡和移动行为。 | **☕ 自由活动与老板 NPC**<br>员工可以前往咖啡区、会议区和白板；老板会在会议厅巡视并给出反馈。 |
+| **💬 点击员工继续对话**<br>聊天侧栏通过 `codex exec resume` 继续选中的真实会话，并流式显示公开活动摘要。 | **🧠 按会话选择模型**<br>合并 Codex bundled catalog 与本地会话模型，选择结果按会话记忆，只影响后续消息。 |
+| **🖥️ 桌面与浏览器双模式**<br>既可作为 GTK4 独立桌面应用运行，也可使用零第三方 Python 后端在浏览器中打开。 | **🔒 本地优先的安全边界**<br>默认仅监听回环地址，状态数据库只读打开，聊天接口始终拒绝非本机客户端。 |
+
+## 🚀 快速开始
+
+### 前置条件
+
+- Python 3.11 或更高版本，以及包含 `state_5.sqlite` 的本机 Codex 数据目录。
+- 如需继续会话或选择模型，需要安装并登录 [Codex CLI](https://github.com/openai/codex)；纯状态监控不要求 CLI 可执行文件存在。
+- 桌面模式需要 Linux 图形环境、PyGObject、GTK4 和 WebKitGTK 6。
+- 浏览器模式的状态面板仅使用 Python 标准库；仓库附带的便捷脚本使用 Bash。
+
+> [!TIP]
+> Arch Linux 可使用 `sudo pacman -S python-gobject gtk4 webkitgtk-6.0` 安装桌面依赖。其他发行版的软件包名称可能不同。
+
+### 1. 直接运行桌面窗口
+
+在已经获取的项目目录中执行：
 
 ```bash
-cd ~/codex-pixel-office
-./install-desktop.sh
-```
-
-安装后，在系统应用启动器中搜索 **Codex Pixel Office** 或 **Codex 像素办公室**。它会以独立窗口启动，不需要先打开终端或浏览器。
-
-也可以不安装，直接运行桌面窗口：
-
-```bash
+cd codex-pixel-office
 ./run-desktop.sh
 ```
 
-卸载应用菜单入口：
+常用选项：
+
+```bash
+# 全屏打开
+./run-desktop.sh --fullscreen
+
+# 展示最近 60 分钟内有更新的会话
+./run-desktop.sh --active-minutes 60
+
+# 使用另一份 Codex 数据目录
+./run-desktop.sh --codex-home /path/to/.codex
+```
+
+### 2. 安装到系统应用菜单
+
+```bash
+./install-desktop.sh
+```
+
+安装后，在应用启动器中搜索 **Codex Pixel Office** 或 **Codex 像素办公室**。卸载菜单入口：
 
 ```bash
 ./uninstall-desktop.sh
 ```
 
-## 浏览器模式（备用）
+安装脚本不需要 root 权限，只会写入当前用户的 XDG 应用和图标目录，不会复制或移动项目源码。启动器会记录当前源码目录的绝对路径，因此安装后不要随意移动或删除仓库目录。
+
+### 3. 使用浏览器模式
 
 ```bash
-cd ~/codex-pixel-office
 ./start.sh
 ```
 
-默认打开 <http://127.0.0.1:8765>。如果不想自动打开浏览器：
+默认打开 <http://127.0.0.1:8765>。如果不希望自动打开浏览器：
 
 ```bash
 CODEX_PIXEL_NO_BROWSER=1 ./start.sh
 ```
 
-可调整端口和活跃窗口：
+自定义端口或活跃时间窗口：
 
 ```bash
 CODEX_PIXEL_PORT=9000 ./start.sh --active-minutes 60
 ```
 
-## 状态映射
+## 🎮 如何使用
 
-- `working`：会话刚产生普通工作事件。
-- `thinking`：模型正在推理或组织回复。
-- `tool`：正在调用终端、文件、浏览器或其他工具。
-- `waiting`：当前在等待用户或外部输入。
-- `idle`：仍在活跃窗口内，但近期没有新事件。
+1. 在 Codex CLI 或 Codex 应用中开始、继续一个任务。
+2. 活跃会话会在下一次同步时自动出现在办公室工位上。
+3. 使用“全部 / 主会话 / 子代理”筛选团队，拖动画布或滚轮缩放巡视办公室。
+4. 点击任意像素员工，查看模型、工作目录、父会话、当前活动和最近更新时间。
+5. 在右侧聊天框发送消息，继续该员工对应的原 Codex 会话。
 
-## 小人动作系统
+聊天框支持：
 
-像素员工会根据会话状态、当前活动、父子代理关系和稳定随机种子，每 8 秒选择一次子动作：敲键盘、阅读上下文、代码审查、踱步思考、白板推演、操作终端、检查服务器、搜索资料、喝咖啡、伸懒腰、同步讨论、打盹、巡视和庆祝完成。
+- `Enter` 发送，`Shift + Enter` 换行。
+- 每个会话独立保存本次软件运行期间的聊天记录和输入草稿。
+- 同一会话同一时间只执行一条消息，避免并发修改冲突。
+- 可为每个会话独立选择后续消息使用的模型；聊天记录、草稿和模型选择只保留在当前应用进程内。
+- 主题、自由活动开关和固定工位映射保存在浏览器 `localStorage` 中。
 
-新会话入场、休息后重新工作、出现错误/审批信号以及任务完成时，会额外播放短暂反馈。处于编写或工具调用状态的小人始终留在自己的工位，只播放原地工作动作；思考、等待和空闲状态才会在开启“自由活动”后分槽前往咖啡区、会议区或父会话附近。关闭自由活动后会全部返回固定工位。设置会保存在本机，并尊重系统的“减少动态效果”偏好。
+## 🚦 状态与动作
 
-主会话使用金色实线的标准工位，子代理使用青绿色虚线的紧凑工位，办公室底部图例也会标明两种类型。小人离开或返回工位时会按距离以较慢速度连续移动，途中改变状态也会从当前位置自然掉头；到达目的地后才恢复对应动作，不会瞬移。
+| 状态 | 判断依据 | 办公室表现 |
+|---|---|---|
+| `working` | 正在读取请求、编写回复、处理工具结果或协调代理 | 留在工位敲键盘、阅读或审查代码 |
+| `thinking` | 最近事件为推理或方案组织 | 阅读上下文、踱步、白板推演或同步讨论 |
+| `tool` | 存在尚未完成的终端、文件、浏览器、MCP 等工具调用 | 留在工位操作终端、检查服务器或搜索资料 |
+| `waiting` | 等待用户输入、外部结果、子代理或下一轮任务 | 前往会议区、咖啡区或在工位等待 |
+| `idle` | 会话仍在活跃窗口内，但近期没有新事件 | 休息、伸懒腰、喝咖啡、巡视或打盹 |
 
-会议厅内常驻一位西装男老板 NPC：深棕短发、藏蓝西装、白衬衫、酒红领带并手持文件夹。他不对应 Codex 会话，不占工位也不计入状态统计；会沿会议厅前侧和右侧通道缓慢巡视，在入口、会议桌和白板附近停留，查看进度、思考、挥手或鼓励团队。点击他可以立即看到一句老板留言；切换窗口后返回时，他会从原位置继续移动，不会瞬移。
+角色每 8 秒根据会话状态、活动类型、父子关系和稳定随机种子选择一次子动作。编写和工具调用状态始终留在固定工位；思考、等待和空闲状态可在开启“自由活动”后前往公共区域。
 
-## 点击小人直接对话
+<details>
+<summary><strong>查看完整动作与反馈机制</strong></summary>
 
-点击任意像素小人后，右侧会打开与该会话绑定的聊天框。消息通过本机 Codex CLI 的 `codex exec resume` 继续对应会话，支持 Enter 发送、Shift+Enter 换行，并流式显示安全收敛后的活动摘要与最终回复。每个会话分别保存当前软件运行期间的聊天记录和输入草稿；同一会话一次只会执行一条消息。
+- 工作动作：敲键盘、阅读上下文、代码审查、操作终端、检查服务器、搜索资料。
+- 思考动作：踱步、白板推演、同步讨论。
+- 休息动作：喝咖啡、伸懒腰、打盹和巡视。
+- 事件反馈：新会话入场、休息后复工、错误或审批信号、任务完成庆祝。
+- 连续移动：员工会按距离在工位和公共区域间移动；途中状态变化时会从当前位置自然掉头。
+- 减少动态效果：尊重系统的 `prefers-reduced-motion` 设置。
 
-聊天框顶部可以为当前小人选择 AI 模型。可用项来自本机安装的 Codex 模型目录，选择会按会话分别记忆，并通过 `codex exec resume --model` 应用于之后发送的消息；它不会新建会话，也不会改变其他小人的模型。模型目录暂时不可用时，聊天会继续沿用原会话或 Codex 配置中的模型。
+</details>
 
-聊天功能需要本机已经安装并登录 Codex CLI。工具权限、沙箱和审批策略沿用该会话及本机 Codex 配置，办公室不会自动添加 `--dangerously-bypass-approvals-and-sandbox`。
+## 🧩 工作原理
 
-## 数据与隐私
+```mermaid
+flowchart LR
+    DB["~/.codex/state_5.sqlite"] -->|只读会话元数据| Service["Python 本地服务"]
+    Rollout["rollout JSONL 尾部"] -->|收敛为公开状态| Service
+    Service --> Sessions["GET /api/sessions"]
+    Sessions --> UI["像素办公室 Web UI"]
+    UI --> Desktop["GTK4 + WebKitGTK 6"]
+    UI --> Browser["现代浏览器"]
+    UI -->|主动发送消息| Chat["POST /api/chat · 仅回环"]
+    Chat --> CLI["codex exec resume"]
+    CLI --> Original["原 Codex 会话"]
+```
 
-办公室监控部分只在本机读取 `~/.codex/state_5.sqlite` 和对应的 rollout JSONL 文件。只有你在聊天框主动发送消息时，后端才会通过本机 Codex CLI 继续对应会话；Codex CLI 会按既有登录、权限和服务连接处理消息，并可能执行该会话允许的工具。界面只展示会话标题、目录、模型、最终回复和经过收敛的活动类型，不展示推理内容、完整命令或工具参数。
+后端会以 SQLite 只读模式读取未归档会话，并且每个 rollout JSONL 文件只读取末尾最多 1 MiB。活动分类器只输出经过允许的状态和简短描述，不把提示词、推理正文、完整命令或工具参数发送到界面。
 
-服务默认只监听 `127.0.0.1`。聊天接口始终只接受本机回环连接；即使手动把状态面板绑定到 `0.0.0.0`，局域网设备也不能通过该接口驱动本机 Codex。
+### 运行模式对比
 
-## 开发与测试
+| 模式 | 启动方式 | 额外依赖 | 适用场景 |
+|---|---|---|---|
+| 桌面窗口 | `./run-desktop.sh` | PyGObject、GTK4、WebKitGTK 6 | 日常使用、独立窗口、全屏老板视角 |
+| 应用菜单 | `./install-desktop.sh` | 同桌面窗口 | 从桌面环境启动器快速打开 |
+| 浏览器 | `./start.sh` | 状态面板无需第三方 Python 包 | 开发调试、轻量查看或不安装桌面依赖 |
+
+## 🔐 隐私与安全
+
+> [!IMPORTANT]
+> 默认服务只监听 `127.0.0.1`。即使你把状态面板手动绑定到 `0.0.0.0`，`/api/chat` 和 `/api/chat/models` 仍只接受来自本机回环地址的请求。
+
+- `~/.codex/state_5.sqlite` 使用 SQLite 只读连接，并启用 `query_only`。
+- rollout 路径必须位于配置的 `CODEX_HOME` 内，防止读取目录外文件。
+- 界面只展示会话标题、目录、模型、角色、时间和收敛后的活动类型。
+- 聊天输出经过允许列表过滤，不展示隐藏推理、完整命令或工具参数。
+- 聊天消息长度、请求体、单行事件和总输出均设置上限。
+- 默认限制为单条消息最多 12,000 字符、全局最多 4 条并发聊天、单次最长 10 分钟、总输出最多 2 MiB。
+- Codex CLI 的登录状态、审批策略、沙箱和工具权限完全沿用原会话及本机配置。
+- 服务不会自动添加绕过审批或沙箱的危险参数。
+- 静态资源响应包含 CSP、禁止嵌入、禁用敏感浏览器权限等安全响应头。
+
+> [!WARNING]
+> 设置 `CODEX_PIXEL_HOST=0.0.0.0` 会把**没有登录认证和 TLS 的状态面板**暴露给同一网络中的其他设备，其中可能包含会话标题、工作目录和模型信息。只应在可信局域网中使用，绝不要直接暴露到公网。
+
+## ⚙️ 配置
+
+| 配置项 | 默认值 | 作用范围 | 说明 |
+|---|---:|---|---|
+| `CODEX_HOME` / `--codex-home` | `~/.codex` | 两种模式 | 包含 `state_5.sqlite`、`sessions/` 和 Codex 配置的目录 |
+| `--active-minutes` | `30` | 两种模式 | 只显示最近指定分钟内有更新的未归档会话 |
+| `--fullscreen` | 关闭 | 桌面模式 | 以全屏方式打开办公室 |
+| `CODEX_PIXEL_HOST` | `127.0.0.1` | 浏览器模式 | HTTP 服务监听地址 |
+| `CODEX_PIXEL_PORT` | `8765` | 浏览器模式 | HTTP 服务监听端口 |
+| `CODEX_PIXEL_NO_BROWSER` | `0` | 浏览器模式 | 设为 `1` 时不自动打开浏览器 |
+
+也可以直接运行后端以使用完整命令行参数：
+
+```bash
+python3 server.py --host 127.0.0.1 --port 8765 --active-minutes 30
+```
+
+## 🔌 本地 API
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| `GET` / `HEAD` | `/api/health` | 查看服务、数据库和聊天能力是否可用；数据库不可用时业务状态为 `degraded` |
+| `GET` / `HEAD` | `/api/sessions` | 获取活跃会话、父子关系、状态统计和更新时间 |
+| `GET` / `HEAD` | `/api/chat/models` | 获取本机可用 Codex 模型；仅限回环客户端 |
+| `POST` | `/api/chat` | 继续指定 Codex 会话并返回 NDJSON 流；仅限回环客户端 |
+
+这些接口面向本机 UI，不承诺在 `v0.x` 阶段保持稳定的公共 API 兼容性。
+
+## 🗂️ 项目结构
+
+```text
+codex-pixel-office/
+├── desktop_app.py          # GTK4 / WebKitGTK 桌面外壳
+├── server.py               # 会话解析、本地 HTTP API 与 Codex 聊天桥接
+├── static/
+│   ├── index.html          # 办公室与聊天侧栏结构
+│   ├── styles.css          # 像素 UI、响应式布局与动画
+│   ├── app.js              # 会话同步、角色行为、交互与流式聊天
+│   └── assets/             # 办公室背景、员工、老板、状态图标
+├── packaging/              # Linux Desktop Entry 模板
+├── tests/                  # 后端、桌面参数、安全边界与集成测试
+├── tools/                  # 像素素材生成工具
+├── install-desktop.sh      # 安装当前用户的应用菜单入口
+├── run-desktop.sh          # 启动桌面窗口
+├── start.sh                # 启动浏览器模式
+└── VERSION.md              # 当前版本、兼容性和版本策略
+```
+
+## 🛠️ 开发与测试
+
+运行完整测试套件：
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 server.py --port 8765
 ```
 
-浏览器模式只需要 Python 3 标准库；桌面窗口需要 PyGObject、GTK4 和 WebKitGTK 6（当前机器已安装）。只有重新生成像素素材时才需要 Pillow（Arch Linux 包名通常为 `python-pillow`）：
+启动开发服务器：
 
 ```bash
-python3 tools/make_pixel_assets.py
+python3 server.py --port 8765 --open-browser
 ```
 
-Codex 的 `state_5.sqlite` 和 rollout JSONL 属于本机内部状态格式；如果未来 Codex 升级改变其结构，本项目的解析层可能需要同步适配。
+在有图形显示的环境中执行桌面冒烟测试：
+
+```bash
+./run-desktop.sh --smoke-test
+```
+
+浏览器模式运行时只依赖 Python 标准库。只有重新生成或验证像素素材时才需要 Pillow：
+
+```bash
+python3 -m pip install Pillow
+python3 tools/make_pixel_assets.py
+python3 tools/make_pixel_assets.py --check-only
+```
+
+当前测试套件包含 27 项后端与桌面测试，覆盖真实 GTK/WebKit 页面冒烟测试、聊天子进程生命周期、模型目录、输入边界、回环限制、Host 校验和静态路径穿越防护。
+
+## 🩺 常见问题
+
+<details>
+<summary><strong>办公室里没有出现任何员工</strong></summary>
+
+确认 Codex 已经创建会话，并检查 `CODEX_HOME` 是否指向正确目录。默认只展示最近 30 分钟内有更新的未归档会话，也可以使用 `--active-minutes 60` 扩大时间窗口。
+
+</details>
+
+<details>
+<summary><strong>能看到员工，但无法发送消息</strong></summary>
+
+确认 `codex --version` 可以正常执行且 Codex CLI 已登录。聊天只能从运行服务的本机访问；同一会话已有消息执行时，新请求会暂时被拒绝。
+
+</details>
+
+<details>
+<summary><strong>桌面窗口提示没有图形显示或缺少组件</strong></summary>
+
+确认当前会话存在可用的 Wayland/X11 图形显示，并安装 PyGObject、GTK4 与 WebKitGTK 6。若暂时不安装桌面依赖，可改用 `./start.sh`。
+
+</details>
+
+<details>
+<summary><strong>端口 8765 已被占用</strong></summary>
+
+使用其他端口启动：`CODEX_PIXEL_PORT=9000 ./start.sh`。
+
+</details>
+
+## 📌 版本与兼容性
+
+当前声明版本为 **v0.1.0 Preview**。完整的支持范围、已知限制和语义化版本规则见 [VERSION.md](VERSION.md)。
+
+项目依赖 Codex 的本机 `state_5.sqlite` 和 rollout JSONL 内部格式。如果未来 Codex CLI 调整这些结构，解析层可能需要同步适配。
+
+## 📄 许可证与品牌说明
+
+当前仓库尚未包含 `LICENSE` 文件。在对外复制、修改或分发前，请先由项目维护者补充明确的许可证。
+
+Codex、OpenAI 及相关标识归其各自权利人所有。本项目为独立工具，与 OpenAI 不存在官方隶属或背书关系。
+
+---
+
+<p align="center">
+  <strong>让 AI 团队的工作，不再只发生在看不见的终端里。</strong>
+</p>
