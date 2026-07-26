@@ -10,6 +10,7 @@
     <img src="https://img.shields.io/badge/Linux-GTK4-7fe719?style=flat-square&logo=gtk&logoColor=1b1f23" alt="Linux GTK4 桌面应用" />
     <img src="https://img.shields.io/badge/Windows-WebView2-0078d4?style=flat-square&logo=windows&logoColor=white" alt="Windows WebView2 桌面应用" />
     <img src="https://img.shields.io/badge/Privacy-local--first-35b27f?style=flat-square" alt="本地优先" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0--only-663399?style=flat-square" alt="GPL-3.0-only 许可证" /></a>
   </p>
 
   <p>
@@ -17,7 +18,8 @@
     <a href="#-功能亮点">功能亮点</a> ·
     <a href="#-工作原理">工作原理</a> ·
     <a href="#-隐私与安全">隐私与安全</a> ·
-    <a href="VERSION.md">版本声明</a>
+    <a href="VERSION.md">版本声明</a> ·
+    <a href="#-许可证与品牌说明">许可证</a>
   </p>
 </div>
 
@@ -410,7 +412,9 @@ Linux 使用 `CODEX_PIXEL_PORT=9000 ./start.sh`；Windows PowerShell 使用 `$en
 
 ## 📄 许可证与品牌说明
 
-当前仓库尚未包含 `LICENSE` 文件。在对外复制、修改或分发前，请先由项目维护者补充明确的许可证。
+本项目以 **GNU General Public License v3.0 only**（SPDX：`GPL-3.0-only`）发布。你可以按照 GPLv3 的条款使用、研究、修改和分发本项目；分发修改版或衍生作品时，需要保留相应的版权与许可证声明，并按 GPLv3 提供对应源代码。完整条款见 [LICENSE](LICENSE)。
+
+Copyright © 2026 qianmo.
 
 Codex、OpenAI 及相关标识归其各自权利人所有。本项目为独立工具，与 OpenAI 不存在官方隶属或背书关系。
 
