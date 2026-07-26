@@ -3444,6 +3444,18 @@ button:focus-visible,
   border-color: #9d7a44;
 }
 
+.chat-status.is-interrupting {
+  color: #863845;
+  background: #f2c9c8;
+  border-color: #a95b63;
+}
+
+.chat-status.is-interrupted {
+  color: #6b5634;
+  background: #eadfbe;
+  border-color: #9a8357;
+}
+
 .chat-status.is-error {
   color: #8b3641;
   background: #f6d5d3;
@@ -3753,7 +3765,15 @@ button:focus-visible,
   line-height: 1.35;
 }
 
-.chat-send {
+.chat-form-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.chat-send,
+.chat-interrupt {
   min-width: 72px;
   height: 32px;
   display: inline-flex;
@@ -3767,16 +3787,38 @@ button:focus-visible,
   font-size: 9px;
 }
 
+.chat-send[hidden],
+.chat-interrupt[hidden] {
+  display: none;
+}
+
 .chat-send i {
   color: #f1cd6b;
   font-style: normal;
+}
+
+.chat-interrupt {
+  color: #fff8ee;
+  background: #b94f59;
+  border-color: #70363d;
+}
+
+.chat-interrupt i {
+  color: #ffd2a3;
+  font-size: 7px;
+  font-style: normal;
+}
+
+.chat-interrupt:hover:not(:disabled) {
+  background: #ca5b64;
 }
 
 .chat-send:hover:not(:disabled) {
   background: #755fa0;
 }
 
-.chat-send:disabled {
+.chat-send:disabled,
+.chat-interrupt:disabled {
   color: #918a94;
   background: #d9d2cf;
   border-color: #9b9297;
@@ -4443,6 +4485,12 @@ body.is-modal-open {
   border-color: #6f927c;
 }
 
+.overtime-progress-state.is-interrupted {
+  color: #6b5634;
+  background: #eadfbe;
+  border-color: #9a8357;
+}
+
 .overtime-progress-log {
   max-height: 190px;
   display: flex;
@@ -4744,7 +4792,8 @@ body[data-theme="night"] .chat-form textarea::placeholder {
 }
 
 body[data-theme="night"] .chat-form textarea:disabled,
-body[data-theme="night"] .chat-send:disabled {
+body[data-theme="night"] .chat-send:disabled,
+body[data-theme="night"] .chat-interrupt:disabled {
   color: #817a88;
   background: #3c3944;
   border-color: #5e5864;

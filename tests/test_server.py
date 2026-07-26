@@ -384,7 +384,7 @@ print("stderr-secret", file=sys.stderr, flush=True)
         return httpd, thread
 
     @staticmethod
-    def _post_chat(
+    def _open_chat_stream(
         httpd,
         payload,
         *,
@@ -402,6 +402,23 @@ print("stderr-secret", file=sys.stderr, flush=True)
             headers={"Content-Type": content_type},
         )
         response = connection.getresponse()
+        return connection, response
+
+    @classmethod
+    def _post_chat(
+        cls,
+        httpd,
+        payload,
+        *,
+        content_type="application/json",
+        path="/api/chat",
+    ):
+        connection, response = cls._open_chat_stream(
+            httpd,
+            payload,
+            content_type=content_type,
+            path=path,
+        )
         status = response.status
         content_type_header = response.getheader("Content-Type") or ""
         data = response.read()
@@ -666,6 +683,7 @@ print("stderr-secret", file=sys.stderr, flush=True)
             self.assertIn("application/x-ndjson", content_type)
             events = [json.loads(line) for line in body.splitlines()]
             self.assertEqual("started", events[0]["status"])
+            self.assertTrue(server.valid_chat_request_id(events[0].get("request_id")))
             self.assertEqual("done", events[-1]["type"])
             self.assertTrue(events[-1]["ok"])
             report_event = next(item for item in events if item["type"] == "assistant")
@@ -715,6 +733,7 @@ print("stderr-secret", file=sys.stderr, flush=True)
             self.assertEqual(200, status)
             self.assertIn("application/x-ndjson", content_type)
             events = [json.loads(line) for line in body.splitlines()]
+            self.assertTrue(server.valid_chat_request_id(events[0].get("request_id")))
             connected = next(
                 item
                 for item in events
@@ -977,6 +996,145 @@ print("stderr-secret", file=sys.stderr, flush=True)
             httpd.shutdown()
             httpd.server_close()
             thread.join(timeout=2)
+
+    def test_chat_interrupt_stops_running_turn_and_stale_id_is_harmless(self):
+        fake_codex = self._fake_codex()
+        chat = server.CodexChatService(
+            self.service(),
+            codex_bin=fake_codex,
+            timeout_seconds=5,
+            heartbeat_seconds=1,
+            terminate_grace_seconds=0.05,
+        )
+        httpd, thread = self._chat_server(chat)
+        connections = []
+
+        def open_blocked_turn(wait_file):
+            with mock.patch.dict(
+                os.environ,
+                {"FAKE_CODEX_WAIT_FILE": str(wait_file)},
+            ):
+                connection, response = self._open_chat_stream(
+                    httpd,
+                    {"session_id": "parent-1111", "message": "keep working"},
+                )
+            connections.append(connection)
+            self.assertEqual(HTTPStatus.OK, response.status)
+            first_line = response.readline()
+            self.assertTrue(first_line)
+            first_event = json.loads(first_line)
+            self.assertEqual("started", first_event["status"])
+            self.assertTrue(server.valid_chat_request_id(first_event.get("request_id")))
+            return response, first_event["request_id"]
+
+        def interrupt(request_id):
+            status, _, body = self._post_chat(
+                httpd,
+                {"request_id": request_id},
+                path="/api/chat/interrupt",
+            )
+            self.assertEqual(HTTPStatus.OK, status)
+            return json.loads(body)
+
+        try:
+            first_response, first_request_id = open_blocked_turn(
+                Path(self.tempdir.name) / "interrupt-wait-first"
+            )
+            self.assertEqual(1, chat.active_count)
+
+            first_interrupt = interrupt(first_request_id)
+            self.assertTrue(first_interrupt["ok"])
+            self.assertTrue(first_interrupt["interrupted"])
+            first_events = [
+                json.loads(line)
+                for line in first_response.read().splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(
+                "interrupted",
+                next(item for item in first_events if item["type"] == "status")["status"],
+            )
+            first_done = next(item for item in first_events if item["type"] == "done")
+            self.assertFalse(first_done["ok"])
+            self.assertTrue(first_done["interrupted"])
+            self.assertFalse(any(item["type"] == "error" for item in first_events))
+            self.assertEqual(0, chat.active_count)
+
+            repeated = interrupt(first_request_id)
+            self.assertFalse(repeated["interrupted"])
+
+            second_response, second_request_id = open_blocked_turn(
+                Path(self.tempdir.name) / "interrupt-wait-second"
+            )
+            self.assertNotEqual(first_request_id, second_request_id)
+            self.assertEqual(1, chat.active_count)
+
+            stale = interrupt(first_request_id)
+            self.assertFalse(stale["interrupted"])
+            self.assertEqual(1, chat.active_count)
+
+            current = interrupt(second_request_id)
+            self.assertTrue(current["interrupted"])
+            second_events = [
+                json.loads(line)
+                for line in second_response.read().splitlines()
+                if line.strip()
+            ]
+            second_done = next(item for item in second_events if item["type"] == "done")
+            self.assertTrue(second_done["interrupted"])
+            self.assertEqual(0, chat.active_count)
+        finally:
+            for connection in connections:
+                connection.close()
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
+    def test_chat_interrupt_validates_request_id_and_requires_loopback(self):
+        chat = server.CodexChatService(self.service(), codex_bin=self._fake_codex())
+        httpd, thread = self._chat_server(chat)
+        try:
+            invalid_values = (
+                None,
+                "",
+                "0" * 31,
+                "0" * 33,
+                "A" * 32,
+                "g" * 32,
+                123,
+            )
+            for request_id in invalid_values:
+                with self.subTest(request_id=request_id):
+                    status, _, body = self._post_chat(
+                        httpd,
+                        {"request_id": request_id},
+                        path="/api/chat/interrupt",
+                    )
+                    self.assertEqual(HTTPStatus.BAD_REQUEST, status)
+                    self.assertEqual("invalid_request_id", json.loads(body)["code"])
+
+            status, _, body = self._post_chat(
+                httpd,
+                {"request_id": "f" * 32},
+                path="/api/chat/interrupt",
+            )
+            self.assertEqual(HTTPStatus.OK, status)
+            self.assertFalse(json.loads(body)["interrupted"])
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+            thread.join(timeout=2)
+
+        handler = object.__new__(server.PixelOfficeHandler)
+        handler.client_address = ("192.168.1.50", 12345)
+        handler._send_json = mock.Mock()
+        handler.chat_service = mock.Mock()
+        handler._handle_chat_interrupt()
+        handler._send_json.assert_called_once_with(
+            HTTPStatus.FORBIDDEN,
+            {"error": "chat is only available from this computer"},
+        )
+        handler.chat_service.interrupt.assert_not_called()
 
     def test_chat_http_requires_bounded_json_body_and_loopback_client(self):
         handler = object.__new__(server.PixelOfficeHandler)
@@ -1292,6 +1450,18 @@ print("stderr-secret", file=sys.stderr, flush=True)
         self.assertIn('const HISTORY_API_URL = "/api/sessions/history"', script)
         self.assertIn('const NEW_CHAT_API_URL = "/api/chat/new"', script)
         self.assertIn(".overtime-mode-panel[hidden]", styles)
+
+    def test_chat_interrupt_frontend_contract_is_bundled(self):
+        index = (PROJECT_ROOT / "static" / "index.html").read_text(encoding="utf-8")
+        script = (PROJECT_ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        styles = (PROJECT_ROOT / "static" / "styles.css").read_text(encoding="utf-8")
+
+        self.assertIn('id="chatInterrupt"', index)
+        self.assertIn('const INTERRUPT_CHAT_API_URL = "/api/chat/interrupt"', script)
+        self.assertIn("async function interruptChatMessage", script)
+        self.assertIn("markChatInterrupted", script)
+        self.assertIn(".chat-interrupt", styles)
+        self.assertIn(".chat-status.is-interrupted", styles)
 
 
 if __name__ == "__main__":

@@ -58,6 +58,7 @@ DEFAULT_MODEL_CATALOG_TIMEOUT_SECONDS = 5.0
 MAX_MODEL_CATALOG_BYTES = 2 * 1024 * 1024
 CHAT_MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 CHAT_SESSION_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}")
+CHAT_REQUEST_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
 WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
 WINDOWS_CREATE_NO_WINDOW = 0x08000000
 
@@ -99,6 +100,13 @@ def valid_chat_session_id(value: Any) -> bool:
         isinstance(value, str)
         and 1 <= len(value) <= MAX_CHAT_SESSION_ID_CHARS
         and CHAT_SESSION_ID_PATTERN.fullmatch(value) is not None
+    )
+
+
+def valid_chat_request_id(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and CHAT_REQUEST_ID_PATTERN.fullmatch(value) is not None
     )
 
 
@@ -1088,10 +1096,12 @@ class _ChatJob:
     def __init__(
         self,
         reservation_key: str,
+        request_id: str,
         session_id: str | None,
         deadline: float,
     ) -> None:
         self.reservation_key = reservation_key
+        self.request_id = request_id
         self.session_id = session_id
         self.is_new = session_id is None
         self.deadline = deadline
@@ -1099,6 +1109,7 @@ class _ChatJob:
         self.events: queue.Queue[tuple[str, bytes | None]] = queue.Queue(maxsize=128)
         self.stop_event = threading.Event()
         self.cancelled = threading.Event()
+        self.interrupted = threading.Event()
         self.timed_out = threading.Event()
         self.finished = threading.Event()
         self.threads: list[threading.Thread] = []
@@ -1321,6 +1332,7 @@ class CodexChatService:
             reservation_key = session_id or f"new:{uuid.uuid4().hex}"
             job = _ChatJob(
                 reservation_key,
+                uuid.uuid4().hex,
                 session_id,
                 self.monotonic() + self.timeout_seconds,
             )
@@ -1623,8 +1635,14 @@ class CodexChatService:
         reported_error = False
         output_bytes = 0
         raw_output_bytes = 0
+        interrupted = False
         try:
-            while not job.cancelled.is_set():
+            while True:
+                if job.interrupted.is_set():
+                    interrupted = True
+                    break
+                if job.cancelled.is_set():
+                    break
                 remaining = deadline - self.monotonic()
                 if job.timed_out.is_set() or remaining <= 0:
                     job.timed_out.set()
@@ -1644,9 +1662,19 @@ class CodexChatService:
                         timeout=min(self.heartbeat_seconds, remaining)
                     )
                 except queue.Empty:
+                    if job.interrupted.is_set():
+                        interrupted = True
+                        break
+                    if job.cancelled.is_set():
+                        break
                     if process.poll() is None:
                         yield {"type": "status", "status": "working", "message": "正在处理"}
                     continue
+                if kind == "interrupted" or job.interrupted.is_set():
+                    interrupted = True
+                    break
+                if job.cancelled.is_set():
+                    break
                 if kind == "stdout_done":
                     stdout_done = True
                     continue
@@ -1692,6 +1720,9 @@ class CodexChatService:
                 mapped = map_codex_chat_event(parsed, job.session_id)
                 if mapped is None:
                     continue
+                if job.interrupted.is_set():
+                    interrupted = True
+                    break
                 mapped_session_id = mapped.get("session_id")
                 if isinstance(mapped_session_id, str) and not self._adopt_session_id(
                     job, mapped_session_id
@@ -1732,6 +1763,21 @@ class CodexChatService:
                 }:
                     break
 
+            if interrupted or job.interrupted.is_set():
+                yield {
+                    "type": "status",
+                    "status": "interrupted",
+                    "message": "已停止生成",
+                    "request_id": job.request_id,
+                }
+                yield {
+                    "type": "done",
+                    "ok": False,
+                    "interrupted": True,
+                    "request_id": job.request_id,
+                }
+                return
+
             returncode = process.poll()
             if job.is_new and job.session_id is None and not job.cancelled.is_set():
                 failed = True
@@ -1767,6 +1813,34 @@ class CodexChatService:
             self._terminate_process(job.process)
         self._close_job_pipes(job)
         self._finish(job)
+
+    def interrupt(self, request_id: str) -> bool:
+        """Interrupt one active turn identified by its unique public request ID."""
+
+        with self._condition:
+            job = next(
+                (
+                    active
+                    for active in self._active.values()
+                    if active.request_id == request_id
+                ),
+                None,
+            )
+            if job is None or job.finished.is_set():
+                return False
+            if job.interrupted.is_set():
+                return True
+            job.interrupted.set()
+            job.cancelled.set()
+            job.stop_event.set()
+            try:
+                job.events.put_nowait(("interrupted", None))
+            except queue.Full:
+                # A full queue already guarantees the stream consumer will wake.
+                pass
+
+        self.cancel(job)
+        return True
 
     def close(self) -> None:
         with self._condition:
@@ -1973,7 +2047,12 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
         try:
             self._send_ndjson_headers(job.deadline)
             self._write_ndjson(
-                {"type": "status", "status": "started", "message": "已开始处理"},
+                {
+                    "type": "status",
+                    "status": "started",
+                    "message": "已开始处理",
+                    "request_id": job.request_id,
+                },
                 job.deadline,
             )
             for event in self.chat_service.events_for(job):
@@ -2036,6 +2115,36 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
             return
 
         self._stream_chat_job(job)
+
+    def _handle_chat_interrupt(self) -> None:
+        if not self._client_is_loopback():
+            self._send_json(
+                HTTPStatus.FORBIDDEN,
+                {"error": "chat is only available from this computer"},
+            )
+            return
+        value = self._read_chat_json()
+        if value is None:
+            return
+        request_id = value.get("request_id")
+        if not valid_chat_request_id(request_id):
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {
+                    "error": "request_id must be a 32-character lowercase hexadecimal string",
+                    "code": "invalid_request_id",
+                },
+            )
+            return
+        interrupted = self.chat_service.interrupt(request_id)
+        self._send_json(
+            HTTPStatus.OK,
+            {
+                "ok": True,
+                "interrupted": interrupted,
+                "request_id": request_id,
+            },
+        )
 
     def _handle_new_chat(self) -> None:
         if not self._client_is_loopback():
@@ -2233,6 +2342,8 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
                 self._handle_chat()
             elif path.rstrip("/") == "/api/chat/new":
                 self._handle_new_chat()
+            elif path.rstrip("/") == "/api/chat/interrupt":
+                self._handle_chat_interrupt()
             elif path.startswith("/api/"):
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "unknown API endpoint"})
             else:

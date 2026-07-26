@@ -46,7 +46,7 @@
 |---|---|
 | **🏢 实时像素办公室**<br>每 2 秒同步最近活跃的 Codex 会话，让每个会话自动入驻自己的工位。 | **🧭 主会话与子代理层级**<br>主会话使用金色标准工位，子代理使用青绿色紧凑工位，并保留父子关系。 |
 | **🎬 状态驱动的角色动作**<br>编写、思考、工具调用、等待和空闲会触发不同动作、气泡和移动行为。 | **☕ 自由活动与老板 NPC**<br>员工可以前往咖啡区、会议区和白板；老板会在会议厅巡视并给出反馈。 |
-| **💬 点击员工继续对话**<br>聊天侧栏通过 `codex exec resume` 继续选中的真实会话，并流式显示公开活动摘要。 | **🧠 按会话选择模型**<br>合并 Codex bundled catalog 与本地会话模型，选择结果按会话记忆，只影响后续消息。 |
+| **💬 对话、流式回复与打断**<br>聊天侧栏通过 `codex exec resume` 继续真实会话；回复中可随时打断当前轮次，并保留已经收到的内容。 | **🧠 按会话选择模型**<br>合并 Codex bundled catalog 与本地会话模型，选择结果按会话记忆，只影响后续消息。 |
 | **🌙 叫人来加班**<br>直接创建新 Codex 会话，或搜索未归档的历史会话并叫回来继续对话。 | **⚡ 自动入场与定位**<br>新建或恢复成功后立即刷新办公室，并自动选中刚开始工作的像素同事。 |
 | **🖥️ 跨平台桌面与浏览器模式**<br>Linux 使用 GTK4 / WebKitGTK，Windows 使用 WebView2，也可通过零第三方 Python 后端在浏览器中打开。 | **🔒 本地优先的安全边界**<br>默认仅监听回环地址，状态数据库只读打开，聊天接口始终拒绝非本机客户端。 |
 
@@ -217,9 +217,11 @@ flowchart LR
     UI --> Browser["现代浏览器"]
     UI -->|主动发送消息| Chat["POST /api/chat · 仅回环"]
     UI -->|创建新会话| NewChat["POST /api/chat/new · 仅回环"]
+    UI -->|打断当前轮次| Interrupt["POST /api/chat/interrupt · 仅回环"]
     UI -->|搜索旧会话| History["GET /api/sessions/history · 仅回环"]
     Chat --> CLI["codex exec resume"]
     NewChat --> CLI
+    Interrupt --> CLI
     History --> DB
     CLI --> Original["原 Codex 会话"]
 ```
@@ -238,13 +240,14 @@ flowchart LR
 ## 🔐 隐私与安全
 
 > [!IMPORTANT]
-> 默认服务只监听 `127.0.0.1`。即使你把状态面板手动绑定到 `0.0.0.0`，`/api/chat`、`/api/chat/new`、`/api/chat/models` 和 `/api/sessions/history` 仍只接受来自本机回环地址的请求。
+> 默认服务只监听 `127.0.0.1`。即使你把状态面板手动绑定到 `0.0.0.0`，`/api/chat`、`/api/chat/new`、`/api/chat/interrupt`、`/api/chat/models` 和 `/api/sessions/history` 仍只接受来自本机回环地址的请求。
 
 - `~/.codex/state_5.sqlite` 使用 SQLite 只读连接，并启用 `query_only`。
 - rollout 路径必须位于配置的 `CODEX_HOME` 内，防止读取目录外文件。
 - 界面只展示会话标题、目录、模型、角色、时间和收敛后的活动类型。
 - 聊天输出经过允许列表过滤，不展示隐藏推理、完整命令或工具参数。
 - 聊天消息长度、请求体、单行事件和总输出均设置上限。
+- “打断”会终止当前轮次的 Codex 进程树，但不会回滚打断前已经完成的文件修改、命令或外部操作。
 - 默认限制为单条消息最多 12,000 字符、全局最多 4 条并发聊天、单次最长 10 分钟、总输出最多 2 MiB。
 - Codex CLI 的登录状态、审批策略、沙箱和工具权限完全沿用原会话及本机配置。
 - 服务不会自动添加绕过审批或沙箱的危险参数。
@@ -284,6 +287,7 @@ python3 server.py --host 127.0.0.1 --port 8765 --active-minutes 30
 | `GET` / `HEAD` | `/api/chat/models` | 获取本机可用 Codex 模型；仅限回环客户端 |
 | `POST` | `/api/chat` | 继续指定 Codex 会话并返回 NDJSON 流；仅限回环客户端 |
 | `POST` | `/api/chat/new` | 在指定的本机工作目录创建 Codex 会话并返回 NDJSON 流；仅限回环客户端 |
+| `POST` | `/api/chat/interrupt` | 按本轮唯一 `request_id` 打断正在运行的 Codex 请求；仅限回环客户端 |
 
 这些接口面向本机 UI，不承诺在 `v0.x` 阶段保持稳定的公共 API 兼容性。
 

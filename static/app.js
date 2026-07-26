@@ -5,6 +5,7 @@
   const HISTORY_API_URL = "/api/sessions/history";
   const CHAT_API_URL = "/api/chat";
   const NEW_CHAT_API_URL = "/api/chat/new";
+  const INTERRUPT_CHAT_API_URL = "/api/chat/interrupt";
   const MODELS_API_URL = "/api/chat/models";
   const POLL_MS = 2000;
   const BASE_SCENE_WIDTH = 1600;
@@ -131,6 +132,7 @@
     chatForm: $("#chatForm"),
     chatInput: $("#chatInput"),
     chatSend: $("#chatSend"),
+    chatInterrupt: $("#chatInterrupt"),
     chatStatus: $("#chatStatus"),
     chatAnnouncer: $("#chatAnnouncer"),
     chatModelSelect: $("#chatModelSelect"),
@@ -1316,11 +1318,13 @@
 
     const selected = modelSelectionFor(sessionId);
     if (elements.chatModelSelect.value !== selected) elements.chatModelSelect.value = selected;
-    elements.chatModelSelect.disabled = chat.sending || state.modelsLoading || !state.models.length;
+    const chatBusy = chat.sending || chat.interrupting;
+    elements.chatModelSelect.disabled = chatBusy || state.modelsLoading || !state.models.length;
     elements.chatModelSelect.setAttribute("aria-busy", String(state.modelsLoading));
 
     let statusText = "按会话记忆，仅影响后续发送";
-    if (chat.sending) statusText = "发送中，暂不可切换";
+    if (chat.interrupting) statusText = "正在打断，暂不可切换";
+    else if (chat.sending) statusText = "发送中，暂不可切换";
     else if (state.modelsLoading) statusText = "正在读取可用模型…";
     else if (state.modelsError || !state.models.length) statusText = "模型列表不可用，沿用会话配置";
     if (elements.chatModelStatus.textContent !== statusText) elements.chatModelStatus.textContent = statusText;
@@ -1366,6 +1370,9 @@
       statusKind: "idle",
       assistantIndex: -1,
       controller: null,
+      requestId: "",
+      interrupting: false,
+      interrupted: false,
       doneSeen: false,
       hadError: false,
     };
@@ -1491,7 +1498,7 @@
   function createChatPendingNode(statusText) {
     const pending = document.createElement("div");
     pending.className = "chat-pending";
-    pending.setAttribute("aria-label", "Codex CLI 正在回复");
+    pending.setAttribute("aria-label", statusText || "Codex CLI 正在回复");
     const dots = document.createElement("span");
     dots.className = "chat-pending-dots";
     dots.setAttribute("aria-hidden", "true");
@@ -1512,16 +1519,29 @@
     const chat = chatStateFor(sessionId);
     const selected = state.selectedId === sessionId;
     const text = selected ? elements.chatInput.value : chat.draft;
-    elements.chatSend.disabled = chat.sending || !String(text || "").trim();
+    const busy = chat.sending || chat.interrupting;
+    elements.chatSend.disabled = busy || !String(text || "").trim();
+    elements.chatSend.hidden = busy;
+    elements.chatInterrupt.hidden = !busy;
+    elements.chatInterrupt.disabled = !chat.sending || chat.interrupting;
     const sendLabel = $("span", elements.chatSend);
-    if (sendLabel) sendLabel.textContent = chat.sending ? "发送中" : "发送";
+    if (sendLabel) sendLabel.textContent = "发送";
+    const interruptLabel = $("span", elements.chatInterrupt);
+    if (interruptLabel) interruptLabel.textContent = chat.interrupting ? "打断中" : "打断";
     elements.chatForm.classList.toggle("is-sending", chat.sending);
-    elements.chatForm.setAttribute("aria-busy", String(chat.sending));
-    elements.chatInput.placeholder = chat.sending ? "正在回复，可先输入下一条消息…" : "给这位同事安排工作…";
-    elements.chatStatus.textContent = chat.sending ? (chat.statusText || "发送中") : (chat.statusText || "就绪");
-    elements.chatStatus.classList.toggle("is-sending", chat.sending);
-    elements.chatStatus.classList.toggle("is-error", !chat.sending && chat.statusKind === "error");
-    elements.chatLog.setAttribute("aria-busy", String(chat.sending));
+    elements.chatForm.classList.toggle("is-interrupting", chat.interrupting);
+    elements.chatForm.setAttribute("aria-busy", String(busy));
+    elements.chatInput.placeholder = chat.interrupting
+      ? "正在打断当前回复…"
+      : chat.sending
+        ? "正在回复，可先输入下一条消息…"
+        : "给这位同事安排工作…";
+    elements.chatStatus.textContent = chat.statusText || (busy ? "发送中" : "就绪");
+    elements.chatStatus.classList.toggle("is-sending", chat.sending && !chat.interrupting);
+    elements.chatStatus.classList.toggle("is-interrupting", chat.interrupting);
+    elements.chatStatus.classList.toggle("is-interrupted", !busy && chat.statusKind === "interrupted");
+    elements.chatStatus.classList.toggle("is-error", !busy && chat.statusKind === "error");
+    elements.chatLog.setAttribute("aria-busy", String(busy));
     renderModelSelector(sessionId, false);
   }
 
@@ -1537,16 +1557,17 @@
 
     if (switching || forceLog) {
       const distanceFromBottom = elements.chatLog.scrollHeight - elements.chatLog.scrollTop - elements.chatLog.clientHeight;
-      const shouldStick = switching || chat.sending || distanceFromBottom < 48;
+      const busy = chat.sending || chat.interrupting;
+      const shouldStick = switching || busy || distanceFromBottom < 48;
       const fragment = document.createDocumentFragment();
-      if (!chat.messages.length && !chat.sending) {
+      if (!chat.messages.length && !busy) {
         const empty = document.createElement("p");
         empty.className = "chat-empty";
         empty.textContent = "这里会显示本次软件内的对话。发送消息后，Codex CLI 的公开活动摘要也会出现在这里。";
         fragment.append(empty);
       } else {
         chat.messages.forEach((message) => fragment.append(createChatMessageNode(message)));
-        if (chat.sending) fragment.append(createChatPendingNode(chat.statusText));
+        if (busy) fragment.append(createChatPendingNode(chat.statusText));
       }
       elements.chatLog.replaceChildren(fragment);
       if (shouldStick) requestAnimationFrame(() => { elements.chatLog.scrollTop = elements.chatLog.scrollHeight; });
@@ -1578,11 +1599,28 @@
     });
   }
 
+  function markChatInterrupted(chat, message) {
+    const text = compactPublicText(message, 360) || "已打断本次回复。";
+    if (!chat.interrupted) appendChatItem(chat, "status", text);
+    chat.interrupted = true;
+    chat.doneSeen = true;
+    chat.hadError = false;
+    chat.statusText = "已打断";
+    chat.statusKind = "interrupted";
+  }
+
   function processChatEvent(sessionId, chat, event) {
     if (!event || typeof event !== "object") return false;
+    const requestId = typeof event.request_id === "string" ? event.request_id : "";
+    if (/^[0-9a-f]{32}$/.test(requestId)) chat.requestId = requestId;
     const type = String(event.type || "").toLowerCase();
     if (type === "status") {
       const text = statusEventText(event);
+      if (String(event.status || "").toLowerCase() === "interrupted" || event.interrupted === true) {
+        markChatInterrupted(chat, text);
+        scheduleChatRender(sessionId);
+        return true;
+      }
       appendChatItem(chat, "status", text);
       chat.statusText = text;
       chat.statusKind = "sending";
@@ -1613,7 +1651,9 @@
     }
     if (type === "done") {
       chat.doneSeen = true;
-      if (event.ok === false) {
+      if (event.interrupted === true) {
+        markChatInterrupted(chat, "已打断本次回复。");
+      } else if (event.ok === false) {
         if (!chat.hadError) appendChatItem(chat, "error", errorEventText(event) || "Codex CLI 未能完成这次请求。");
         chat.hadError = true;
         chat.statusText = "执行未完成";
@@ -1718,11 +1758,59 @@
     return `聊天请求失败（HTTP ${response.status}）。`;
   }
 
+  async function requestChatInterrupt(requestId) {
+    const response = await fetch(INTERRUPT_CHAT_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      credentials: "same-origin",
+      body: JSON.stringify({ request_id: requestId }),
+    });
+    if (!response.ok) throw new Error(await httpChatError(response));
+    const payload = await response.json();
+    return Boolean(payload && payload.interrupted);
+  }
+
+  async function interruptChatMessage(sessionId) {
+    const chat = chatStateFor(sessionId);
+    if (!chat.sending || chat.interrupting) return;
+    const requestId = chat.requestId;
+    const controller = chat.controller;
+    chat.interrupting = true;
+    chat.statusText = "正在打断当前回复…";
+    chat.statusKind = "interrupting";
+    if (state.selectedId === sessionId) {
+      renderChat(sessionId, true);
+      announceChat("正在打断 Codex 回复。");
+    }
+
+    let interrupted = false;
+    try {
+      if (!/^[0-9a-f]{32}$/.test(requestId)) throw new Error("request id is not ready");
+      interrupted = await requestChatInterrupt(requestId);
+    } catch (_) {
+      // Aborting the original stream remains a fallback if the interrupt API is unavailable.
+      interrupted = true;
+    }
+
+    if (interrupted) {
+      markChatInterrupted(chat, "已打断本次回复。");
+      if (controller) controller.abort();
+    } else {
+      chat.interrupting = false;
+    }
+    if (!chat.sending) chat.interrupting = false;
+    if (state.selectedId === sessionId) {
+      renderChat(sessionId, true);
+      announceChat(interrupted ? "已打断 Codex 回复。" : "回复已经结束，无需打断。");
+      if (!chat.sending) focusChatInput(sessionId, true);
+    }
+  }
+
   async function sendChatMessage(sessionId, message) {
     const chat = chatStateFor(sessionId);
     const content = String(message || "").trim().slice(0, 12000);
-    if (!content || chat.sending) {
-      if (chat.sending) announceChat("当前会话仍在回复，请稍候再发送。");
+    if (!content || chat.sending || chat.interrupting) {
+      if (chat.sending || chat.interrupting) announceChat("当前会话仍在处理，请稍候再发送。");
       return;
     }
     const selectedModel = modelSelectionFor(sessionId);
@@ -1735,6 +1823,9 @@
     chat.assistantIndex = -1;
     chat.doneSeen = false;
     chat.hadError = false;
+    chat.requestId = "";
+    chat.interrupting = false;
+    chat.interrupted = false;
     chat.controller = typeof AbortController === "function" ? new AbortController() : null;
     if (state.selectedId === sessionId) {
       elements.chatInput.value = "";
@@ -1755,29 +1846,34 @@
       });
       if (!response.ok) throw new Error(await httpChatError(response));
       await consumeChatResponse(sessionId, chat, response);
-      if (!chat.hadError && chat.assistantIndex < 0) throw new Error("Codex CLI 没有返回可显示的回复。请稍后重试。");
-      if (!chat.doneSeen && !chat.hadError) {
+      if (!chat.interrupted && !chat.hadError && chat.assistantIndex < 0) throw new Error("Codex CLI 没有返回可显示的回复。请稍后重试。");
+      if (!chat.interrupted && !chat.doneSeen && !chat.hadError) {
         chat.statusText = "回复完成";
         chat.statusKind = "done";
       }
     } catch (error) {
       const rawError = compactPublicText(error && error.message, 600);
-      const messageText = error && error.name === "AbortError"
-        ? "聊天请求已取消。"
-        : error instanceof TypeError && /fetch|network|load/i.test(rawError)
-          ? "无法连接 Codex CLI，请稍后重试。"
-          : rawError || "无法连接 Codex CLI，请稍后重试。";
-      appendChatItem(chat, "error", messageText);
-      chat.hadError = true;
-      chat.statusText = "发送失败";
-      chat.statusKind = "error";
+      if (chat.interrupted || (error && error.name === "AbortError" && chat.interrupting)) {
+        markChatInterrupted(chat, "已打断本次回复。");
+      } else {
+        const messageText = error && error.name === "AbortError"
+          ? "聊天请求已取消。"
+          : error instanceof TypeError && /fetch|network|load/i.test(rawError)
+            ? "无法连接 Codex CLI，请稍后重试。"
+            : rawError || "无法连接 Codex CLI，请稍后重试。";
+        appendChatItem(chat, "error", messageText);
+        chat.hadError = true;
+        chat.statusText = "发送失败";
+        chat.statusKind = "error";
+      }
     } finally {
       chat.sending = false;
+      if (chat.interrupted) chat.interrupting = false;
       chat.controller = null;
       chat.assistantIndex = -1;
       if (state.selectedId === sessionId) {
         renderChat(sessionId, true);
-        announceChat(chat.hadError ? "消息发送失败。" : "Codex 回复完成。" );
+        announceChat(chat.interrupted ? "已打断 Codex 回复。" : chat.hadError ? "消息发送失败。" : "Codex 回复完成。" );
         focusChatInput(sessionId, true);
       }
     }
@@ -1861,6 +1957,7 @@
     elements.overtimeProgressState.textContent = chat.statusText || "处理中";
     elements.overtimeProgressState.classList.toggle("is-error", chat.statusKind === "error");
     elements.overtimeProgressState.classList.toggle("is-done", chat.statusKind === "done");
+    elements.overtimeProgressState.classList.toggle("is-interrupted", chat.statusKind === "interrupted");
     const fragment = document.createDocumentFragment();
     chat.messages.forEach((message) => fragment.append(createChatMessageNode(message)));
     if (state.overtime.sending) fragment.append(createChatPendingNode(chat.statusText));
@@ -2096,7 +2193,19 @@
 
   function closeOvertime(abortRequest = true) {
     if (!state.overtime.open) return;
-    if (abortRequest && state.overtime.controller) state.overtime.controller.abort();
+    if (abortRequest && state.overtime.controller) {
+      const controller = state.overtime.controller;
+      const chat = state.overtime.chat;
+      const requestId = chat && chat.requestId;
+      if (chat) {
+        chat.interrupting = true;
+        markChatInterrupted(chat, "已停止这次加班呼叫。");
+      }
+      if (/^[0-9a-f]{32}$/.test(String(requestId || ""))) {
+        requestChatInterrupt(requestId).catch(() => false);
+      }
+      controller.abort();
+    }
     if (state.overtime.historyController) state.overtime.historyController.abort();
     window.clearTimeout(state.overtime.historyTimer);
     state.overtime.historyTimer = 0;
@@ -2156,6 +2265,9 @@
     chat.assistantIndex = -1;
     chat.doneSeen = false;
     chat.hadError = false;
+    chat.requestId = "";
+    chat.interrupting = false;
+    chat.interrupted = false;
     state.overtime.chat = chat;
     state.overtime.sessionId = targetId;
     state.overtime.sending = true;
@@ -2219,19 +2331,23 @@
       }
     } catch (error) {
       const rawError = compactPublicText(error && error.message, 600);
-      const cancelled = error && error.name === "AbortError";
-      const messageText = cancelled
-        ? "已停止这次加班呼叫。"
-        : error instanceof TypeError && /fetch|network|load/i.test(rawError)
+      const cancelled = chat.interrupted || (error && error.name === "AbortError");
+      if (cancelled) {
+        markChatInterrupted(chat, "已停止这次加班呼叫。");
+        if (state.overtime.open) setOvertimeError("");
+      } else {
+        const messageText = error instanceof TypeError && /fetch|network|load/i.test(rawError)
           ? "无法连接 Codex CLI，请稍后重试。"
           : rawError || "无法连接 Codex CLI，请稍后重试。";
-      if (!chat.hadError) appendChatItem(chat, "error", messageText);
-      chat.hadError = true;
-      chat.statusText = cancelled ? "已停止" : "呼叫失败";
-      chat.statusKind = "error";
-      if (state.overtime.open) setOvertimeError(messageText);
+        if (!chat.hadError) appendChatItem(chat, "error", messageText);
+        chat.hadError = true;
+        chat.statusText = "呼叫失败";
+        chat.statusKind = "error";
+        if (state.overtime.open) setOvertimeError(messageText);
+      }
     } finally {
       chat.sending = false;
+      if (chat.interrupted) chat.interrupting = false;
       chat.controller = null;
       chat.assistantIndex = -1;
       state.overtime.sending = false;
@@ -2241,7 +2357,7 @@
       if (state.overtime.open) {
         updateOvertimeForm();
         renderOvertimeProgress();
-        announceOvertime(succeeded ? "会话已就绪，正在进入办公室。" : "加班呼叫未完成。");
+        announceOvertime(succeeded ? "会话已就绪，正在进入办公室。" : chat.interrupted ? "已停止这次加班呼叫。" : "加班呼叫未完成。");
       }
     }
 
@@ -2609,6 +2725,12 @@
       sendChatMessage(sessionId, elements.chatInput.value);
     });
 
+    elements.chatInterrupt.addEventListener("click", () => {
+      const sessionId = state.selectedId;
+      if (!sessionId) return;
+      interruptChatMessage(sessionId);
+    });
+
     elements.chatInput.addEventListener("input", () => {
       const sessionId = state.selectedId;
       if (!sessionId) return;
@@ -2630,7 +2752,7 @@
       if (!sessionId) return;
       const chat = chatStateFor(sessionId);
       const modelId = elements.chatModelSelect.value;
-      if (chat.sending) {
+      if (chat.sending || chat.interrupting) {
         renderModelSelector(sessionId, false);
         return;
       }

@@ -255,9 +255,14 @@
                 <textarea id="chatInput" name="message" rows="2" maxlength="12000" autocomplete="off" spellcheck="true" aria-describedby="chatHint chatPermissionNote" placeholder="给这位同事安排工作…"></textarea>
                 <div class="chat-form-footer">
                   <small id="chatHint">Enter 发送 · Shift+Enter 换行</small>
-                  <button class="pixel-button chat-send" id="chatSend" type="submit" disabled>
-                    <span>发送</span><i aria-hidden="true">↗</i>
-                  </button>
+                  <div class="chat-form-actions">
+                    <button class="pixel-button chat-interrupt" id="chatInterrupt" type="button" aria-controls="chatLog" aria-label="打断当前 Codex 回复" hidden>
+                      <span>打断</span><i aria-hidden="true">■</i>
+                    </button>
+                    <button class="pixel-button chat-send" id="chatSend" type="submit" disabled>
+                      <span>发送</span><i aria-hidden="true">↗</i>
+                    </button>
+                  </div>
                 </div>
               </form>
               <p class="sr-only" id="chatAnnouncer" aria-live="polite"></p>
