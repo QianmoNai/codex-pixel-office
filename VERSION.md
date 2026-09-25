@@ -4,16 +4,16 @@
 
 | 项目 | 声明 |
 |---|---|
-| 产品版本 | `v0.2.0` |
-| 发布阶段 | Preview / 技术预览 |
-| 声明日期 | 2026-07-25 |
+| 产品版本 | `v1.2.0` |
+| 发布阶段 | Release / 源码发布 |
+| 声明日期 | 2026-09-26 |
 | 默认分支 | `main` |
 | 版本规范 | [Semantic Versioning 2.0.0](https://semver.org/lang/zh-CN/) |
 
-`v0.2.0` 增加了 Windows 原生 WebView2 桌面外壳、PowerShell/CMD 启动与开始菜单安装、`codex.exe` / `codex.cmd` 解析，以及 Windows 子进程树清理。Linux GTK 桌面端和零第三方依赖的浏览器模式继续保留；对外接口与 Codex 内部状态格式仍可能变化，因此仍处于技术预览阶段。
+`v1.2.0` 在既有 `v1.1.0` 标签基础上增加“叫人来加班”新会话启动、聊天中断控制，并优化会话轮询和聊天超时处理。此前版本已增加 Windows 原生 WebView2 桌面外壳、PowerShell/CMD 启动与开始菜单安装、`codex.exe` / `codex.cmd` 解析，以及 Windows 子进程树清理。Linux GTK 桌面端和零第三方依赖的浏览器模式继续保留；对外接口与 Codex 内部状态格式仍可能变化，升级 Codex 后请确认兼容性。
 
 > [!NOTE]
-> `server.py` 中 HTTP `Server` 响应头使用的产品标识，以及 Desktop Entry 中的 `Version=1.0` 字段，不代表应用的语义化版本；本文件中的 `v0.2.0` 才是当前产品版本声明。
+> `server.py` 中 HTTP `Server` 响应头使用的产品标识，以及 Desktop Entry 中的 `Version=1.0` 字段，不代表应用的语义化版本；本文件中的 `v1.2.0` 才是当前产品版本声明。
 
 ## 本版本包含
 
@@ -24,6 +24,8 @@
 - 常驻会议厅的老板 NPC、办公室缩放、平移、筛选和昼夜模式。
 - 通过本机 `codex exec resume` 继续选中的原会话。
 - 按会话选择 Codex 模型，并流式展示经过过滤的公开活动摘要。
+- “叫人来加班”新会话启动与聊天中断控制。
+- 会话轮询与聊天超时处理优化。
 - Linux GTK4 / WebKitGTK 6 桌面窗口与 Windows pywebview / WebView2 桌面窗口。
 - Linux XDG 与 Windows 开始菜单安装入口，以及两端的浏览器运行脚本。
 - Windows `codex.exe` / `codex.cmd` 解析、隐藏控制台启动和超时后的进程树清理。
@@ -46,7 +48,7 @@
 ## 稳定性与已知限制
 
 1. **Codex 状态格式并非稳定公共 API。** 项目读取 `state_5.sqlite` 和 rollout JSONL；上游结构变化可能需要更新解析层。
-2. **`v0.x` API 仍可能调整。** 本地 HTTP 接口、JSON 字段和前端本地存储格式暂不承诺长期向后兼容。
+2. **内部接口可能调整。** 本地 HTTP 接口、JSON 字段和前端本地存储格式不是稳定的公共扩展接口。
 3. **Windows 桌面依赖 WebView2。** 应用会校验 .NET、系统安装的 WebView2 最低版本和最终渲染器，并拒绝回退到已弃用、无法运行当前前端语法的 MSHTML；缺少 Runtime 时需要用户从 Microsoft 安装 Evergreen Runtime。Fixed Runtime 的版本由用户保证，目录必须位于本地磁盘，并可能需要额外的 AppContainer 文件权限。
 4. **聊天能力依赖本机 Codex 环境。** 登录、模型目录、工具权限、审批策略和沙箱均由原 Codex CLI 配置决定。
 5. **这不是多用户远程控制面板。** 即使状态页面被手动绑定到局域网地址，聊天和模型接口仍限制为本机回环客户端。

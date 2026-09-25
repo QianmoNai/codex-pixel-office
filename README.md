@@ -5,7 +5,7 @@
   <p>在一个本地优先的桌面空间里，观察主会话与子代理的实时状态，点击像素员工继续对话，并从老板视角巡视你的 AI 团队。</p>
 
   <p>
-    <a href="VERSION.md"><img src="https://img.shields.io/badge/version-v0.2.0%20Preview-f2a65a?style=flat-square" alt="版本 v0.2.0 Preview" /></a>
+    <a href="VERSION.md"><img src="https://img.shields.io/badge/version-v1.2.0-f2a65a?style=flat-square" alt="版本 v1.2.0" /></a>
     <img src="https://img.shields.io/badge/Python-3.11%2B-3776ab?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 或更高版本" />
     <img src="https://img.shields.io/badge/Linux-GTK4-7fe719?style=flat-square&logo=gtk&logoColor=1b1f23" alt="Linux GTK4 桌面应用" />
     <img src="https://img.shields.io/badge/Windows-WebView2-0078d4?style=flat-square&logo=windows&logoColor=white" alt="Windows WebView2 桌面应用" />
@@ -404,7 +404,7 @@ Linux 使用 `CODEX_PIXEL_PORT=9000 ./start.sh`；Windows PowerShell 使用 `$en
 
 ## 📌 版本与兼容性
 
-当前声明版本为 **v0.2.0 Preview**。完整的支持范围、已知限制和语义化版本规则见 [VERSION.md](VERSION.md)。
+当前声明版本为 **v1.2.0**。完整的支持范围、已知限制和语义化版本规则见 [VERSION.md](VERSION.md)。
 
 项目依赖 Codex 的本机 `state_5.sqlite` 和 rollout JSONL 内部格式。如果未来 Codex CLI 调整这些结构，解析层可能需要同步适配。
 
