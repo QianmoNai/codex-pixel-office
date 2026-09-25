@@ -25,6 +25,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
+          trap {
+            $detail = ($_ | Out-String).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Output "::error title=Windows check failed::$detail"
+            exit 1
+          }
           python -c "from collections.abc import MutableMapping; import webview; assert isinstance(webview.settings, MutableMapping); webview.settings['ALLOW_DOWNLOADS'] = False"
       - name: Run unit tests
         shell: bash
@@ -50,6 +55,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
+          trap {
+            $detail = ($_ | Out-String).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Output "::error title=Windows check failed::$detail"
+            exit 1
+          }
           .\start-windows.ps1 --help
           .\run-windows.ps1 --help
           & .\start-windows.cmd --help
@@ -60,6 +70,11 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: |
+          trap {
+            $detail = ($_ | Out-String).Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            Write-Output "::error title=Windows check failed::$detail"
+            exit 1
+          }
           $runtime = Join-Path $env:RUNNER_TEMP "WebView2 Fixed Runtime"
           $programs = Join-Path $env:RUNNER_TEMP "Programs"
           New-Item -ItemType Directory -Path $runtime -Force | Out-Null

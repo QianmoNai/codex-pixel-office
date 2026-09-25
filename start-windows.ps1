@@ -1,5 +1,5 @@
 $ErrorActionPreference = "Stop"
-$RootDir = Split-Path -LiteralPath $MyInvocation.MyCommand.Path -Parent
+$RootDir = $PSScriptRoot
 
 function Test-PythonCandidate {
     param([string]$Path, [string[]]$Prefix)

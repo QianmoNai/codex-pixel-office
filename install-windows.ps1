@@ -4,7 +4,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RootDir = Split-Path -LiteralPath $MyInvocation.MyCommand.Path -Parent
+$RootDir = $PSScriptRoot
 
 function Test-PythonCandidate {
     param([string]$Path, [string[]]$Prefix)
@@ -76,7 +76,7 @@ if (-not $SkipDependencies) {
 }
 
 $PythonExecutable = (& $PythonPath @PythonPrefix -c "import sys; print(sys.executable)" | Select-Object -Last 1).Trim()
-$PythonwExecutable = Join-Path (Split-Path -LiteralPath $PythonExecutable -Parent) "pythonw.exe"
+$PythonwExecutable = Join-Path ([System.IO.Path]::GetDirectoryName($PythonExecutable)) "pythonw.exe"
 if (-not (Test-Path -LiteralPath $PythonwExecutable -PathType Leaf)) {
     $PythonwExecutable = $PythonExecutable
 }
