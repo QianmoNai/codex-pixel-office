@@ -38,8 +38,10 @@ jobs:
           )
           print(result.stdout)
           if result.returncode:
-              details = result.stdout[-20000:].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-              print(f"::error title=Unit test failures::{details}")
+              failures = result.stdout.split("======================================================================")[1:]
+              for failure in failures or [result.stdout[-3500:]]:
+                  details = failure[:3500].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+                  print(f"::error title=Unit test failure::{details}")
           sys.exit(result.returncode)
           PY
       - name: Check JavaScript syntax
