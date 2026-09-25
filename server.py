@@ -134,7 +134,7 @@ def executable_command(
     platform_name: str | None = None,
     resolver: Callable[[str], str | None] = shutil.which,
     environment: Mapping[str, str] | None = None,
-) -> list[str]:
+) -> list[str] | str:
     """Resolve an executable and safely bridge Windows batch launchers."""
 
     platform_name = os.name if platform_name is None else platform_name
@@ -152,7 +152,9 @@ def executable_command(
     quoted_executable = f'"{resolved.replace("%", "%%")}"'
     argument_line = subprocess.list2cmdline(command[1:])
     inner = f"{quoted_executable} {argument_line}" if argument_line else quoted_executable
-    return [comspec, "/d", "/s", "/c", f'"{inner}"']
+    # Pass a raw Windows command line: Popen would apply CRT escaping to a
+    # list, but cmd.exe does not interpret backslash-escaped double quotes.
+    return f'{subprocess.list2cmdline([comspec])} /d /s /c "{inner}"'
 
 
 def process_group_options(platform_name: str | None = None) -> dict[str, Any]:
@@ -1184,7 +1186,7 @@ class CodexChatService:
     def model_is_allowed(self, model: str | None) -> bool:
         return model is None or self.allowed_models is None or model in self.allowed_models
 
-    def _codex_command(self, *arguments: str) -> list[str]:
+    def _codex_command(self, *arguments: str) -> list[str] | str:
         return executable_command(
             self.codex_bin,
             arguments,
@@ -1192,7 +1194,7 @@ class CodexChatService:
             resolver=self.executable_resolver,
         )
 
-    def _run_catalog_process(self, command: Sequence[str], **kwargs: Any) -> Any | None:
+    def _run_catalog_process(self, command: Sequence[str] | str, **kwargs: Any) -> Any | None:
         try:
             process = self.catalog_popen(
                 command,
@@ -2271,7 +2273,9 @@ class PixelOfficeHandler(BaseHTTPRequestHandler):
             return
         try:
             size = candidate.stat().st_size
-            content_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            # Windows registry MIME overrides must not break bundled scripts.
+            bundled_types = {".js": "text/javascript", ".css": "text/css", ".html": "text/html"}
+            content_type = bundled_types.get(candidate.suffix.lower()) or mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(size))

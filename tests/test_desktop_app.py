@@ -264,10 +264,10 @@ class DesktopArgumentTests(unittest.TestCase):
             assets.mkdir()
             fallback = assets / "status-working.png"
             fallback.write_bytes(b"fallback")
-            self.assertEqual(fallback, desktop_app.resolve_icon_path(tempdir))
+            self.assertEqual(fallback.resolve(), desktop_app.resolve_icon_path(tempdir))
             preferred = assets / "app-icon.png"
             preferred.write_bytes(b"preferred")
-            self.assertEqual(preferred, desktop_app.resolve_icon_path(tempdir))
+            self.assertEqual(preferred.resolve(), desktop_app.resolve_icon_path(tempdir))
 
     def test_smoke_test_without_a_display_fails_with_json(self):
         environment = os.environ.copy()

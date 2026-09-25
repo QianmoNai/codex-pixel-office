@@ -247,10 +247,10 @@ class SessionServiceTests(unittest.TestCase):
             resolver=lambda _value: batch_path,
             environment={"COMSPEC": r"C:\Windows\System32\cmd.exe"},
         )
-        self.assertEqual(r"C:\Windows\System32\cmd.exe", command[0])
-        self.assertEqual(["/d", "/s", "/c"], command[1:4])
-        self.assertIn(f'"{batch_path}"', command[4])
-        self.assertIn("session-123", command[4])
+        self.assertIsInstance(command, str)
+        self.assertTrue(command.startswith(r"C:\Windows\System32\cmd.exe /d /s /c "))
+        self.assertIn(f'"{batch_path}"', command)
+        self.assertIn("session-123", command)
 
         direct = server.executable_command(
             "codex",
