@@ -4,16 +4,16 @@
 
 | 项目 | 声明 |
 |---|---|
-| 产品版本 | `v1.2.1` |
+| 产品版本 | `v1.2.2` |
 | 发布阶段 | Release / 源码发布 |
 | 声明日期 | 2026-09-26 |
 | 默认分支 | `main` |
 | 版本规范 | [Semantic Versioning 2.0.0](https://semver.org/lang/zh-CN/) |
 
-`v1.2.1` 在既有 `v1.1.0` 标签基础上增加“叫人来加班”新会话启动、聊天中断控制，并优化会话轮询和聊天超时处理。此前版本已增加 Windows 原生 WebView2 桌面外壳、PowerShell/CMD 启动与开始菜单安装、`codex.exe` / `codex.cmd` 解析，以及 Windows 子进程树清理。Linux GTK 桌面端和零第三方依赖的浏览器模式继续保留；对外接口与 Codex 内部状态格式仍可能变化，升级 Codex 后请确认兼容性。
+`v1.2.2` 在既有 `v1.1.0` 标签基础上增加“叫人来加班”新会话启动、聊天中断控制，并优化会话轮询和聊天超时处理。此前版本已增加 Windows 原生 WebView2 桌面外壳、PowerShell/CMD 启动与开始菜单安装、`codex.exe` / `codex.cmd` 解析，以及 Windows 子进程树清理。Linux GTK 桌面端和零第三方依赖的浏览器模式继续保留；对外接口与 Codex 内部状态格式仍可能变化，升级 Codex 后请确认兼容性。
 
 > [!NOTE]
-> `server.py` 中 HTTP `Server` 响应头使用的产品标识，以及 Desktop Entry 中的 `Version=1.0` 字段，不代表应用的语义化版本；本文件中的 `v1.2.1` 才是当前产品版本声明。
+> `server.py` 中 HTTP `Server` 响应头使用的产品标识，以及 Desktop Entry 中的 `Version=1.0` 字段，不代表应用的语义化版本；本文件中的 `v1.2.2` 才是当前产品版本声明。
 
 ## 本版本包含
 
