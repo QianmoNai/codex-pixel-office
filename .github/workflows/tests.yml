@@ -27,7 +27,21 @@ jobs:
         run: |
           python -c "from collections.abc import MutableMapping; import webview; assert isinstance(webview.settings, MutableMapping); webview.settings['ALLOW_DOWNLOADS'] = False"
       - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+        shell: bash
+        run: |
+          python - <<'PY'
+          import subprocess
+          import sys
+          result = subprocess.run(
+              [sys.executable, "-m", "unittest", "discover", "-s", "tests", "-v"],
+              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+          )
+          print(result.stdout)
+          if result.returncode:
+              details = result.stdout[-20000:].replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error title=Unit test failures::{details}")
+          sys.exit(result.returncode)
+          PY
       - name: Check JavaScript syntax
         run: node --check static/app.js
       - name: Check Windows launchers
